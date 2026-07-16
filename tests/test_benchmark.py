@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from debuginfod.benchmark import (
     BenchmarkReport,
+    BinaryBenchmark,
     LatencyStats,
     discover_binaries,
+    extract_build_id,
+    resolve_build_id,
     run_benchmark,
 )
 
@@ -55,7 +60,52 @@ def test_benchmark_report_summary() -> None:
     assert summary["py_compression_ratio"] == 0.2
 
 
-@patch("debuginfod.benchmark.extract_build_id", return_value="deadbeef")
+def test_extract_build_id_from_gcc_binary(tmp_path: Path) -> None:
+    if not shutil_which("gcc"):
+        pytest.skip("gcc not available")
+
+    src = tmp_path / "t.c"
+    src.write_text("int main(void) { return 0; }\n")
+    binary = tmp_path / "demo_v1"
+    subprocess.run(
+        ["gcc", "-g", "-Wl,--build-id=sha1", "-o", str(binary), str(src)],
+        check=True,
+    )
+    build_id = extract_build_id(binary)
+    assert len(build_id) >= 8
+    assert all(c in "0123456789abcdef" for c in build_id)
+
+
+def shutil_which(cmd: str) -> str | None:
+    import shutil
+
+    return shutil.which(cmd)
+
+
+def test_resolve_build_id_metadata_fallback(tmp_path: Path) -> None:
+    binary = tmp_path / "demo_v1"
+    binary.write_bytes(b"not elf")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metadata":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"buildid": "deadbeef" * 5, "type": "executable", "file": str(binary.resolve())}
+                    ],
+                    "complete": True,
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport, base_url="http://py")
+    build_id = resolve_build_id(binary, client, ["http://py"])
+    assert build_id == "deadbeef" * 5
+
+
+@patch("debuginfod.benchmark.resolve_build_id", return_value="deadbeef")
 @patch("debuginfod.benchmark._fetch_latency_ms")
 def test_run_benchmark(
     mock_latency: MagicMock,
