@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import statistics
-import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -115,19 +113,58 @@ def discover_binaries(testdata: Path, pattern: str = "demo_v*") -> list[Path]:
 
 
 def extract_build_id(path: Path) -> str:
-    """Read GNU build-id from ELF via readelf."""
-    if shutil.which("readelf") is None:
-        raise RuntimeError("readelf not found")
-    result = subprocess.run(
-        ["readelf", "-n", str(path)],
-        capture_output=True,
-        text=True,
-        check=True,
+    """Extract GNU/Go build-id from ELF (pyelftools, без зависимости от readelf)."""
+    from debuginfod.buildid import BuildIDNotFoundError, from_path
+
+    try:
+        return from_path(path).value
+    except BuildIDNotFoundError as exc:
+        raise RuntimeError(
+            f"no build-id in {path}; пересоберите с GNU build-id, например: "
+            f"gcc -g -Wl,--build-id=sha1 -o {path.name} source.c "
+            f"(или запустите scripts/generate_test_artifacts.py заново)"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {path}: {exc}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"cannot parse ELF {path}: {exc}") from exc
+
+
+def resolve_build_id(
+    path: Path,
+    client: httpx.Client | None = None,
+    server_urls: list[str] | None = None,
+) -> str:
+    """Extract build-id locally or lookup via debuginfod /metadata?key=file."""
+    try:
+        return extract_build_id(path)
+    except RuntimeError:
+        if client is None or not server_urls:
+            raise
+
+    abs_path = str(path.resolve())
+    for base in server_urls:
+        try:
+            resp = client.get(
+                f"{base.rstrip('/')}/metadata",
+                params={"key": "file", "value": abs_path},
+            )
+            if resp.status_code != 200:
+                continue
+            results = resp.json().get("results") or []
+            if results:
+                build_id = results[0].get("buildid") or results[0].get("build_id")
+                if build_id:
+                    logger.info("Resolved build-id for %s via %s metadata", path.name, base)
+                    return str(build_id)
+        except Exception as exc:
+            logger.debug("metadata lookup failed for %s on %s: %s", abs_path, base, exc)
+
+    raise RuntimeError(
+        f"no build-id in {path} and not found via debuginfod metadata; "
+        "пересоберите бинарники (scripts/generate_test_artifacts.py) "
+        "и убедитесь, что оба сервера проиндексировали testdata"
     )
-    for line in result.stdout.splitlines():
-        if "Build ID:" in line:
-            return line.split(":", 1)[1].strip().lower()
-    raise RuntimeError(f"no build-id in {path}")
 
 
 def _fetch_latency_ms(
@@ -180,7 +217,7 @@ def run_benchmark(
             logger.warning("Failed to fetch Python /stats: %s", exc)
 
         for path in binaries:
-            build_id = extract_build_id(path)
+            build_id = resolve_build_id(path, client, [py_url, go_url])
             entry = BinaryBenchmark(
                 label=path.name,
                 file=str(path.resolve()),

@@ -28,7 +28,15 @@ def _build_version(out_dir: Path, version: int, base_body: str) -> Path:
         _write_minimal_c(src, f"demo_v{version}", extra + base_body)
         binary = out_dir / f"demo_v{version}"
         subprocess.run(
-            ["gcc", "-g", "-O0", "-o", str(binary), str(src)],
+            [
+                "gcc",
+                "-g",
+                "-O0",
+                "-Wl,--build-id=sha1",
+                "-o",
+                str(binary),
+                str(src),
+            ],
             check=True,
         )
         return binary

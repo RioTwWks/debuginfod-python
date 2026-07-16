@@ -120,7 +120,9 @@ DEBUGINFOD_PORT=8003 DEBUGINFOD_SCAN_PATH=./testdata/versions python -m debuginf
 python scripts/generate_test_artifacts.py -o testdata/versions -n 10
 ```
 
-Скрипт собирает `demo_v1` … `demo_vN` с небольшими изменениями — имитация инкрементальных сборок.
+Скрипт собирает `demo_v1` … `demo_vN` с флагом `-Wl,--build-id=sha1` (обязательно для бенчмарка).
+
+Если бинарники уже есть, но без build-id — пересоберите их этой командой.
 
 ### 3. Запустить сравнение
 
