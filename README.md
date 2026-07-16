@@ -126,12 +126,16 @@ python scripts/generate_test_artifacts.py -o testdata/versions -n 10
 
 ### 3. Запустить сравнение
 
+Бенчмарк автоматически вызывает `POST /admin/rescan` на обоих серверах перед тестом.
+
 ```bash
 python scripts/compare_benchmark.py \
   --go-url http://localhost:8002 \
   --py-url http://localhost:8003 \
   --testdata testdata/versions
 ```
+
+Убедитесь, что оба сервера запущены с `DEBUGINFOD_SCAN_PATH=testdata/versions` (или абсолютным путём к нему).
 
 Скрипт выводит JSON с:
 

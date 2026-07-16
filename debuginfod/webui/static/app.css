@@ -407,6 +407,17 @@ body {
   cursor: wait;
 }
 
+.bench-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5rem !important;
+  grid-column: 1 / -1;
+}
+
+.bench-checkbox input {
+  width: auto;
+}
+
 .chart-panel .chart-wrap {
   width: 100%;
   overflow-x: auto;

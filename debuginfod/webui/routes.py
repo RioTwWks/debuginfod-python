@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
-from debuginfod.benchmark import discover_binaries, run_benchmark
+from debuginfod.benchmark import discover_binaries, resolve_testdata_path, run_benchmark
 from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.db import Database, MetadataResult
 from debuginfod.metrics import MetricsCollector
@@ -29,6 +29,7 @@ class BenchmarkRunRequest(BaseModel):
     testdata: str = "testdata/versions"
     runs: int = Field(default=3, ge=1, le=20)
     pattern: str = "demo_v*"
+    rescan: bool = True
 
 
 def _dir_size(path: Path) -> int:
@@ -119,9 +120,10 @@ def register_webui(
 
     @router.post("/ui/api/benchmark/run", include_in_schema=False)
     async def benchmark_run(body: BenchmarkRunRequest) -> dict[str, Any]:
-        testdata = Path(body.testdata)
-        if not testdata.is_dir():
-            raise HTTPException(status_code=400, detail=f"testdata not found: {testdata}")
+        try:
+            testdata = resolve_testdata_path(body.testdata, scan_paths)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         try:
             report = await asyncio.to_thread(
@@ -131,8 +133,12 @@ def register_webui(
                 testdata,
                 body.runs,
                 body.pattern,
+                120.0,
+                body.rescan,
             )
         except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             logger.exception("Benchmark run failed")
