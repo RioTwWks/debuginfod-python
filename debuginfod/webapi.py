@@ -52,6 +52,8 @@ def create_app(
     benchmark_go_url: str = "http://localhost:8002",
     benchmark_py_url: str = "http://localhost:8003",
     benchmark_testdata: Path | None = None,
+    benchmark_go_admin_key: str = "",
+    benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="debuginfod-python", version="0.1.0")
@@ -209,6 +211,8 @@ def create_app(
             benchmark_go_url=benchmark_go_url,
             benchmark_py_url=benchmark_py_url,
             benchmark_testdata=benchmark_testdata,
+            benchmark_go_admin_key=benchmark_go_admin_key,
+            benchmark_py_admin_key=benchmark_py_admin_key,
             scan_paths=scan_paths,
         )
 

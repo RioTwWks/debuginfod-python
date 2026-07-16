@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> None:
         benchmark_go_url=settings.benchmark_go_url,
         benchmark_py_url=py_url,
         benchmark_testdata=settings.benchmark_testdata,
+        benchmark_go_admin_key=settings.benchmark_go_admin_key,
+        benchmark_py_admin_key=settings.benchmark_py_admin_key,
         scan_paths=settings.scan_paths,
     )
 

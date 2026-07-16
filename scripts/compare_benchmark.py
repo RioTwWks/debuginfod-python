@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,19 @@ def main() -> None:
     parser.add_argument("--py-url", default="http://localhost:8003")
     parser.add_argument("--testdata", type=Path, default=Path("testdata/versions"))
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument(
+        "--go-admin-key",
+        default=os.getenv("DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY", ""),
+        help="X-Admin-Token for debuginfod-go rescan (or DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY)",
+    )
+    parser.add_argument(
+        "--py-admin-key",
+        default=os.getenv(
+            "DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY",
+            os.getenv("DEBUGINFOD_ADMIN_KEY", ""),
+        ),
+        help="X-Admin-Token for Python rescan",
+    )
     parser.add_argument("--no-rescan", action="store_true", help="Skip POST /admin/rescan before benchmark")
     args = parser.parse_args()
 
@@ -32,6 +46,8 @@ def main() -> None:
             testdata=args.testdata,
             runs=args.runs,
             rescan=not args.no_rescan,
+            go_admin_key=args.go_admin_key,
+            py_admin_key=args.py_admin_key,
         )
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
@@ -40,7 +56,12 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    payload = report.to_dict()
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if payload.get("warnings"):
+        print("\nWarnings:", file=sys.stderr)
+        for warning in payload["warnings"]:
+            print(f"  - {warning}", file=sys.stderr)
 
 
 if __name__ == "__main__":

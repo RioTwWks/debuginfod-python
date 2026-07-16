@@ -265,6 +265,30 @@ body {
   color: var(--danger);
 }
 
+.warnings-panel {
+  margin-bottom: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  background: rgba(234, 179, 8, 0.1);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  font-size: 0.85rem;
+  color: #fbbf24;
+}
+
+.warnings-panel ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.warnings-panel li {
+  margin: 0.25rem 0;
+}
+
+.cell-error {
+  color: var(--danger);
+  cursor: help;
+}
+
 .table-wrap {
   overflow-x: auto;
 }

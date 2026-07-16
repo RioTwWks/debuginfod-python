@@ -29,6 +29,8 @@ class Settings:
     ui_enabled: bool = True
     benchmark_go_url: str = "http://localhost:8002"
     benchmark_testdata: Path = Path("testdata/versions")
+    benchmark_go_admin_key: str = ""
+    benchmark_py_admin_key: str = ""
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -82,6 +84,11 @@ def load_settings(env_file: str | None = None) -> Settings:
         ui_enabled=_env_bool("DEBUGINFOD_UI_ENABLED", True),
         benchmark_go_url=os.getenv("DEBUGINFOD_BENCHMARK_GO_URL", "http://localhost:8002"),
         benchmark_testdata=Path(os.getenv("DEBUGINFOD_BENCHMARK_TESTDATA", "testdata/versions")),
+        benchmark_go_admin_key=os.getenv("DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY", ""),
+        benchmark_py_admin_key=os.getenv(
+            "DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY",
+            os.getenv("DEBUGINFOD_ADMIN_KEY", ""),
+        ),
     )
 
 

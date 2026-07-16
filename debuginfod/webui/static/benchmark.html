@@ -42,9 +42,18 @@
           <input type="checkbox" id="rescan" name="rescan" checked>
           <span>Rescan перед тестом (POST /admin/rescan)</span>
         </label>
+        <label>
+          <span>Go admin key</span>
+          <input type="password" id="go-admin-key" name="go_admin_key" placeholder="DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY" autocomplete="off">
+        </label>
+        <label>
+          <span>Python admin key</span>
+          <input type="password" id="py-admin-key" name="py_admin_key" placeholder="опционально" autocomplete="off">
+        </label>
         <button type="submit" id="run-btn">Запустить бенчмарк</button>
       </form>
       <p class="hint" id="bench-hint">Сравнивает латентность GET /buildid/…/executable и метрики хранения Python.</p>
+      <div id="bench-warnings" class="warnings-panel" hidden></div>
       <div id="bench-status" class="search-status"></div>
     </section>
 
@@ -66,7 +75,7 @@
       <div class="chart-wrap">
         <canvas id="storage-chart" width="900" height="320" role="img" aria-label="График хранения"></canvas>
       </div>
-      <p class="hint">Go: суммарный размер ELF в testdata. Python: фактически занято в blob-хранилище.</p>
+      <p class="hint">Go: суммарный размер ELF в testdata. Python: оценка занятого места в blob-хранилище только для testdata (не весь /stats).</p>
     </section>
 
     <section class="panel" id="details-panel" hidden>

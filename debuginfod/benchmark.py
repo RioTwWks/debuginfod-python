@@ -32,6 +32,10 @@ class BinaryBenchmark:
     file: str
     build_id: str
     file_size_bytes: int
+    go_build_id: str = ""
+    py_build_id: str = ""
+    py_stored_bytes: int = 0
+    storage_kind: str = ""
     go_latency_ms: LatencyStats | None = None
     py_latency_ms: LatencyStats | None = None
     go_error: str = ""
@@ -44,6 +48,14 @@ class BinaryBenchmark:
             "build_id": self.build_id,
             "file_size_bytes": self.file_size_bytes,
         }
+        if self.go_build_id and self.go_build_id != self.build_id:
+            payload["go_build_id"] = self.go_build_id
+        if self.py_build_id and self.py_build_id != self.build_id:
+            payload["py_build_id"] = self.py_build_id
+        if self.py_stored_bytes:
+            payload["py_stored_bytes"] = self.py_stored_bytes
+        if self.storage_kind:
+            payload["storage_kind"] = self.storage_kind
         if self.go_latency_ms is not None:
             payload["go_latency_ms"] = self.go_latency_ms.to_dict()
         if self.py_latency_ms is not None:
@@ -64,6 +76,7 @@ class BenchmarkReport:
     binaries: list[BinaryBenchmark] = field(default_factory=list)
     python_storage_stats: dict[str, Any] | None = None
     rescan_results: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
     finished_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,17 +87,20 @@ class BenchmarkReport:
             b.py_latency_ms.mean_ms for b in self.binaries if b.py_latency_ms is not None
         ]
         file_sizes = [b.file_size_bytes for b in self.binaries]
-        py_stats = self.python_storage_stats or {}
+        py_stored_testdata = sum(b.py_stored_bytes for b in self.binaries)
+        py_original_testdata = sum(file_sizes)
 
         summary: dict[str, Any] = {
             "binary_count": len(self.binaries),
             "go_mean_latency_ms": statistics.mean(go_means) if go_means else None,
             "py_mean_latency_ms": statistics.mean(py_means) if py_means else None,
-            "go_disk_bytes": sum(file_sizes),
-            "py_original_bytes": py_stats.get("total_original_bytes", sum(file_sizes)),
-            "py_stored_bytes": py_stats.get("total_stored_bytes", 0),
-            "py_bytes_saved": py_stats.get("bytes_saved", 0),
-            "py_compression_ratio": py_stats.get("compression_ratio", 1.0),
+            "go_disk_bytes": py_original_testdata,
+            "py_original_bytes": py_original_testdata,
+            "py_stored_bytes": py_stored_testdata,
+            "py_bytes_saved": max(0, py_original_testdata - py_stored_testdata),
+            "py_compression_ratio": (
+                py_stored_testdata / py_original_testdata if py_original_testdata else 1.0
+            ),
         }
         if summary["go_mean_latency_ms"] and summary["py_mean_latency_ms"]:
             summary["latency_ratio_py_vs_go"] = (
@@ -105,6 +121,7 @@ class BenchmarkReport:
             "binaries": [b.to_dict() for b in self.binaries],
             "python_storage_stats": self.python_storage_stats,
             "rescan_results": self.rescan_results,
+            "warnings": self.warnings,
         }
 
 
@@ -166,12 +183,12 @@ def extract_build_id(path: Path) -> str:
         raise RuntimeError(f"cannot parse ELF {path}: {exc}") from exc
 
 
-def lookup_build_id_metadata(
+def lookup_artifact_metadata(
     client: httpx.Client,
     base_url: str,
     path: Path,
-) -> str | None:
-    """Lookup indexed build-id from debuginfod /metadata."""
+) -> dict[str, Any] | None:
+    """Lookup indexed artifact row from debuginfod /metadata."""
     abs_path = str(path.resolve())
     queries = [
         ("file", abs_path),
@@ -193,12 +210,36 @@ def lookup_build_id_metadata(
                     continue
                 file_path = row.get("file") or ""
                 if key == "file" or file_path.endswith(path.name) or path.name in file_path:
-                    build_id = row.get("buildid") or row.get("build_id")
-                    if build_id:
-                        return str(build_id)
+                    return row
         except Exception as exc:
             logger.debug("metadata %s %s on %s failed: %s", key, value, base_url, exc)
     return None
+
+
+def lookup_build_id_metadata(
+    client: httpx.Client,
+    base_url: str,
+    path: Path,
+) -> str | None:
+    """Lookup indexed build-id from debuginfod /metadata."""
+    row = lookup_artifact_metadata(client, base_url, path)
+    if row is None:
+        return None
+    build_id = row.get("buildid") or row.get("build_id")
+    return str(build_id) if build_id else None
+
+
+def resolve_build_id_for_server(
+    client: httpx.Client,
+    base_url: str,
+    path: Path,
+) -> str:
+    """Resolve build-id for a specific debuginfod server."""
+    build_id = lookup_build_id_metadata(client, base_url, path)
+    if build_id:
+        logger.info("Resolved build-id for %s via %s", path.name, base_url)
+        return build_id
+    return extract_build_id(path)
 
 
 def resolve_build_id(
@@ -206,33 +247,39 @@ def resolve_build_id(
     client: httpx.Client | None = None,
     server_urls: list[str] | None = None,
 ) -> str:
-    """Resolve build-id: prefer server index, then local ELF."""
+    """Resolve build-id (legacy): first server hit, else local ELF."""
     if client is not None and server_urls:
         for base in server_urls:
             build_id = lookup_build_id_metadata(client, base, path)
             if build_id:
-                logger.info("Resolved build-id for %s via %s metadata", path.name, base)
                 return build_id
-
-    try:
-        return extract_build_id(path)
-    except RuntimeError:
-        pass
-
-    if client is not None and server_urls:
-        raise RuntimeError(
-            f"build-id для {path.name} не найден ни в ELF, ни в индексе серверов; "
-            "пересоберите testdata (scripts/generate_test_artifacts.py) "
-            "и выполните rescan на обоих debuginfod"
-        )
-
-    raise RuntimeError(f"no build-id in {path}")
+    return extract_build_id(path)
 
 
-def trigger_rescan(client: httpx.Client, base_url: str) -> dict[str, Any]:
+def _estimate_py_stored_bytes(row: dict[str, Any] | None, file_size: int) -> int:
+    if row is None:
+        return file_size
+    ratio = row.get("compression_ratio")
+    if isinstance(ratio, (int, float)) and ratio > 0:
+        return int(file_size * float(ratio))
+    return file_size
+
+
+def trigger_rescan(
+    client: httpx.Client,
+    base_url: str,
+    admin_key: str = "",
+) -> dict[str, Any]:
     """POST /admin/rescan on debuginfod server."""
+    headers: dict[str, str] = {}
+    if admin_key:
+        headers["X-Admin-Token"] = admin_key
     try:
-        resp = client.post(f"{base_url.rstrip('/')}/admin/rescan", timeout=300.0)
+        resp = client.post(
+            f"{base_url.rstrip('/')}/admin/rescan",
+            headers=headers,
+            timeout=300.0,
+        )
         if resp.status_code == 200:
             try:
                 return {"status": "ok", **resp.json()}
@@ -241,6 +288,47 @@ def trigger_rescan(client: httpx.Client, base_url: str) -> dict[str, Any]:
         return {"status": "error", "code": resp.status_code, "body": resp.text[:300]}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+def _collect_warnings(report: BenchmarkReport) -> list[str]:
+    warnings: list[str] = []
+    go_rescan = report.rescan_results.get("go", {})
+    if go_rescan.get("status") == "error":
+        if go_rescan.get("code") == 401:
+            warnings.append(
+                "Go rescan: 401 unauthorized — задайте DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY "
+                "или тот же ключ, что у debuginfod-go (DEBUGINFOD_ADMIN_KEY)"
+            )
+        else:
+            warnings.append(f"Go rescan не удался: {go_rescan.get('body') or go_rescan.get('message')}")
+
+    py_stats = report.python_storage_stats or {}
+    artifact_count = py_stats.get("artifact_count", 0)
+    if artifact_count > len(report.binaries) * 3:
+        warnings.append(
+            f"Python-сервер проиндексировал {artifact_count} артефактов "
+            f"(не только testdata). Для честного сравнения запустите с "
+            "DEBUGINFOD_SCAN_PATH=testdata/versions"
+        )
+
+    mismatched = [
+        b.label
+        for b in report.binaries
+        if b.go_build_id and b.py_build_id and b.go_build_id != b.py_build_id
+    ]
+    if mismatched:
+        warnings.append(
+            "Разные build-id на Go и Python для: "
+            + ", ".join(mismatched[:5])
+            + ("…" if len(mismatched) > 5 else "")
+            + ". Выполните rescan на обоих серверах."
+        )
+
+    go_errors = sum(1 for b in report.binaries if b.go_error)
+    if go_errors:
+        warnings.append(f"Go latency: ошибки у {go_errors} из {len(report.binaries)} бинарников")
+
+    return warnings
 
 
 def _fetch_latency_ms(
@@ -293,6 +381,8 @@ def run_benchmark(
     pattern: str = "demo_v*",
     timeout_sec: float = 120.0,
     rescan: bool = True,
+    go_admin_key: str = "",
+    py_admin_key: str = "",
 ) -> BenchmarkReport:
     """Run full comparison benchmark and return structured report."""
     binaries = discover_binaries(testdata, pattern)
@@ -309,8 +399,8 @@ def run_benchmark(
     with httpx.Client(timeout=timeout_sec) as client:
         if rescan:
             report.rescan_results = {
-                "go": trigger_rescan(client, go_url),
-                "python": trigger_rescan(client, py_url),
+                "go": trigger_rescan(client, go_url, go_admin_key),
+                "python": trigger_rescan(client, py_url, py_admin_key),
             }
 
         try:
@@ -320,27 +410,36 @@ def run_benchmark(
         except Exception as exc:
             logger.warning("Failed to fetch Python /stats: %s", exc)
 
-        server_urls = [py_url, go_url]
         for path in binaries:
-            build_id = resolve_build_id(path, client, server_urls)
+            file_size = path.stat().st_size
+            go_build_id = resolve_build_id_for_server(client, go_url, path)
+            py_build_id = resolve_build_id_for_server(client, py_url, path)
+            py_meta = lookup_artifact_metadata(client, py_url, path)
+
             entry = BinaryBenchmark(
                 label=path.name,
                 file=str(path.resolve()),
-                build_id=build_id,
-                file_size_bytes=path.stat().st_size,
+                build_id=py_build_id,
+                file_size_bytes=file_size,
+                go_build_id=go_build_id,
+                py_build_id=py_build_id,
+                py_stored_bytes=_estimate_py_stored_bytes(py_meta, file_size),
+                storage_kind=str(py_meta.get("storage_kind", "")) if py_meta else "",
             )
             try:
                 entry.go_latency_ms = _fetch_latency_with_fallback(
-                    client, go_url, path, build_id, runs
+                    client, go_url, path, go_build_id, runs
                 )
             except Exception as exc:
                 entry.go_error = str(exc)
             try:
                 entry.py_latency_ms = _fetch_latency_with_fallback(
-                    client, py_url, path, build_id, runs
+                    client, py_url, path, py_build_id, runs
                 )
             except Exception as exc:
                 entry.py_error = str(exc)
             report.binaries.append(entry)
+
+        report.warnings = _collect_warnings(report)
 
     return report
