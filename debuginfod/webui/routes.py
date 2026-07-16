@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
+from debuginfod.benchmark import discover_binaries, run_benchmark
+from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.db import Database, MetadataResult
 from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class BenchmarkRunRequest(BaseModel):
+    go_url: str = "http://localhost:8002"
+    py_url: str = "http://localhost:8003"
+    testdata: str = "testdata/versions"
+    runs: int = Field(default=3, ge=1, le=20)
+    pattern: str = "demo_v*"
 
 
 def _dir_size(path: Path) -> int:
@@ -50,9 +62,16 @@ def register_webui(
     metrics: MetricsCollector,
     blob_dir: Path,
     reconstruct_cache_dir: Path,
+    benchmark_store: BenchmarkStore | None = None,
+    benchmark_go_url: str = "http://localhost:8002",
+    benchmark_py_url: str = "http://localhost:8003",
+    benchmark_testdata: Path | None = None,
+    scan_paths: list[Path] | None = None,
 ) -> None:
     """Mount /ui dashboard routes on the FastAPI app."""
     router = APIRouter()
+    bench_store = benchmark_store or BenchmarkStore()
+    default_testdata = benchmark_testdata or Path("testdata/versions")
 
     @router.get("/ui", include_in_schema=False)
     async def redirect_ui() -> RedirectResponse:
@@ -65,6 +84,63 @@ def register_webui(
         if not index_path.is_file():
             raise HTTPException(status_code=500, detail="index not found")
         return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
+    @router.get("/ui/benchmark/", include_in_schema=False)
+    @router.get("/ui/benchmark/index.html", include_in_schema=False)
+    async def serve_benchmark() -> HTMLResponse:
+        page = STATIC_DIR / "benchmark.html"
+        if not page.is_file():
+            raise HTTPException(status_code=500, detail="benchmark page not found")
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+
+    @router.get("/ui/api/benchmark/config", include_in_schema=False)
+    async def benchmark_config() -> dict[str, Any]:
+        testdata = default_testdata
+        discovered = discover_binaries(testdata)
+        return {
+            "go_url": benchmark_go_url,
+            "py_url": benchmark_py_url,
+            "testdata": str(testdata),
+            "scan_paths": [str(p) for p in (scan_paths or [])],
+            "binary_count": len(discovered),
+            "binaries": [p.name for p in discovered],
+        }
+
+    @router.get("/ui/api/benchmark/last", include_in_schema=False)
+    async def benchmark_last() -> dict[str, Any]:
+        last = bench_store.last()
+        if last is None:
+            return {"report": None}
+        return {"report": last}
+
+    @router.get("/ui/api/benchmark/history", include_in_schema=False)
+    async def benchmark_history() -> dict[str, Any]:
+        return {"history": bench_store.history()}
+
+    @router.post("/ui/api/benchmark/run", include_in_schema=False)
+    async def benchmark_run(body: BenchmarkRunRequest) -> dict[str, Any]:
+        testdata = Path(body.testdata)
+        if not testdata.is_dir():
+            raise HTTPException(status_code=400, detail=f"testdata not found: {testdata}")
+
+        try:
+            report = await asyncio.to_thread(
+                run_benchmark,
+                body.go_url,
+                body.py_url,
+                testdata,
+                body.runs,
+                body.pattern,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Benchmark run failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        payload = report.to_dict()
+        bench_store.save(payload)
+        return {"report": payload}
 
     @router.get("/ui/api/stats", include_in_schema=False)
     async def ui_stats() -> dict[str, Any]:

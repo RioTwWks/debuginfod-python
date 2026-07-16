@@ -74,6 +74,22 @@ API дашборда:
 
 Отключить UI: `DEBUGINFOD_UI_ENABLED=false` или флаг `--no-ui`.
 
+### Benchmark UI
+
+**http://localhost:8003/ui/benchmark/** — визуализация сравнения Go vs Python:
+
+- форма запуска бенчмарка (URL обоих серверов, testdata, число прогонов)
+- графики латентности по версиям бинарника (canvas)
+- сравнение дискового пространства (Go testdata vs Python blobs)
+- таблица деталей и история запусков
+
+API:
+
+- `GET /ui/api/benchmark/config` — параметры по умолчанию
+- `POST /ui/api/benchmark/run` — запуск сравнения
+- `GET /ui/api/benchmark/last` — последний отчёт
+- `GET /ui/api/benchmark/history` — история (до 20 записей)
+
 Пример для GDB/LLDB:
 
 ```bash
@@ -140,6 +156,8 @@ python scripts/compare_benchmark.py \
 | `DEBUGINFOD_XDELTA3_PATH` | `xdelta3` | Путь к бинарнику xdelta3 |
 | `DEBUGINFOD_RESCAN_INTERVAL` | `3600` | Интервал фонового rescan (сек) |
 | `DEBUGINFOD_UI_ENABLED` | `true` | Web UI на `/ui/` |
+| `DEBUGINFOD_BENCHMARK_GO_URL` | `http://localhost:8002` | URL debuginfod-go для бенчмарка |
+| `DEBUGINFOD_BENCHMARK_TESTDATA` | `testdata/versions` | Каталог с demo_v* для бенчмарка |
 
 ## Тесты
 
