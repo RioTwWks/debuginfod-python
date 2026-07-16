@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--py-url", default="http://localhost:8003")
     parser.add_argument("--testdata", type=Path, default=Path("testdata/versions"))
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--no-rescan", action="store_true", help="Skip POST /admin/rescan before benchmark")
     args = parser.parse_args()
 
     if not args.testdata.is_dir():
@@ -30,8 +31,12 @@ def main() -> None:
             py_url=args.py_url,
             testdata=args.testdata,
             runs=args.runs,
+            rescan=not args.no_rescan,
         )
     except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 

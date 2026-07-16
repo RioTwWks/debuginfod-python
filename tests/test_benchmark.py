@@ -105,11 +105,20 @@ def test_resolve_build_id_metadata_fallback(tmp_path: Path) -> None:
     assert build_id == "deadbeef" * 5
 
 
+def test_discover_binaries_natural_sort(tmp_path: Path) -> None:
+    for name in ("demo_v1", "demo_v10", "demo_v2"):
+        (tmp_path / name).write_bytes(b"x")
+    found = discover_binaries(tmp_path)
+    assert [p.name for p in found] == ["demo_v1", "demo_v2", "demo_v10"]
+
+
+@patch("debuginfod.benchmark.trigger_rescan", return_value={"status": "ok"})
 @patch("debuginfod.benchmark.resolve_build_id", return_value="deadbeef")
-@patch("debuginfod.benchmark._fetch_latency_ms")
+@patch("debuginfod.benchmark._fetch_latency_with_fallback")
 def test_run_benchmark(
     mock_latency: MagicMock,
     _mock_build_id: MagicMock,
+    _mock_rescan: MagicMock,
     tmp_path: Path,
 ) -> None:
     binary = tmp_path / "demo_v1"

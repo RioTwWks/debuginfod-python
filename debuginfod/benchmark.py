@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ class BenchmarkReport:
     runs: int
     binaries: list[BinaryBenchmark] = field(default_factory=list)
     python_storage_stats: dict[str, Any] | None = None
+    rescan_results: dict[str, Any] = field(default_factory=dict)
     finished_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,27 +104,61 @@ class BenchmarkReport:
             "summary": summary,
             "binaries": [b.to_dict() for b in self.binaries],
             "python_storage_stats": self.python_storage_stats,
+            "rescan_results": self.rescan_results,
         }
+
+
+def _natural_sort_key(path: Path) -> tuple[str, int, str]:
+    name = path.name
+    match = re.search(r"(\d+)$", name)
+    if match:
+        return (name[: match.start()], int(match.group(1)), name)
+    return (name, 0, name)
+
+
+def resolve_testdata_path(path: str | Path, scan_paths: list[Path] | None = None) -> Path:
+    """Resolve testdata directory (relative paths → cwd or scan_paths)."""
+    candidate = Path(path)
+    if candidate.is_dir():
+        return candidate.resolve()
+
+    cwd_candidate = Path.cwd() / candidate
+    if cwd_candidate.is_dir():
+        return cwd_candidate.resolve()
+
+    if scan_paths:
+        for root in scan_paths:
+            if root.is_dir() and root.resolve() == cwd_candidate:
+                return root.resolve()
+            nested = root / candidate
+            if nested.is_dir():
+                return nested.resolve()
+            if root.name == candidate.name and root.is_dir():
+                return root.resolve()
+
+    raise FileNotFoundError(
+        f"testdata not found: {path} (cwd={Path.cwd()}); "
+        "укажите абсолютный путь или запустите сервер из корня проекта"
+    )
 
 
 def discover_binaries(testdata: Path, pattern: str = "demo_v*") -> list[Path]:
     """Find ELF binaries for benchmark in testdata directory."""
     if not testdata.is_dir():
         return []
-    return sorted(testdata.glob(pattern))
+    return sorted(testdata.glob(pattern), key=_natural_sort_key)
 
 
 def extract_build_id(path: Path) -> str:
-    """Extract GNU/Go build-id from ELF (pyelftools, без зависимости от readelf)."""
+    """Extract GNU/Go build-id from ELF (pyelftools)."""
     from debuginfod.buildid import BuildIDNotFoundError, from_path
 
     try:
         return from_path(path).value
     except BuildIDNotFoundError as exc:
         raise RuntimeError(
-            f"no build-id in {path}; пересоберите с GNU build-id, например: "
-            f"gcc -g -Wl,--build-id=sha1 -o {path.name} source.c "
-            f"(или запустите scripts/generate_test_artifacts.py заново)"
+            f"no build-id in {path}; пересоберите: "
+            f"python scripts/generate_test_artifacts.py -o {path.parent}"
         ) from exc
     except OSError as exc:
         raise RuntimeError(f"cannot read {path}: {exc}") from exc
@@ -130,41 +166,81 @@ def extract_build_id(path: Path) -> str:
         raise RuntimeError(f"cannot parse ELF {path}: {exc}") from exc
 
 
+def lookup_build_id_metadata(
+    client: httpx.Client,
+    base_url: str,
+    path: Path,
+) -> str | None:
+    """Lookup indexed build-id from debuginfod /metadata."""
+    abs_path = str(path.resolve())
+    queries = [
+        ("file", abs_path),
+        ("file", str(path)),
+        ("glob", f"*{path.name}"),
+        ("glob", f"*/{path.name}"),
+    ]
+    for key, value in queries:
+        try:
+            resp = client.get(
+                f"{base_url.rstrip('/')}/metadata",
+                params={"key": key, "value": value},
+            )
+            if resp.status_code != 200:
+                continue
+            results = resp.json().get("results") or []
+            for row in results:
+                if row.get("type") != "executable":
+                    continue
+                file_path = row.get("file") or ""
+                if key == "file" or file_path.endswith(path.name) or path.name in file_path:
+                    build_id = row.get("buildid") or row.get("build_id")
+                    if build_id:
+                        return str(build_id)
+        except Exception as exc:
+            logger.debug("metadata %s %s on %s failed: %s", key, value, base_url, exc)
+    return None
+
+
 def resolve_build_id(
     path: Path,
     client: httpx.Client | None = None,
     server_urls: list[str] | None = None,
 ) -> str:
-    """Extract build-id locally or lookup via debuginfod /metadata?key=file."""
+    """Resolve build-id: prefer server index, then local ELF."""
+    if client is not None and server_urls:
+        for base in server_urls:
+            build_id = lookup_build_id_metadata(client, base, path)
+            if build_id:
+                logger.info("Resolved build-id for %s via %s metadata", path.name, base)
+                return build_id
+
     try:
         return extract_build_id(path)
     except RuntimeError:
-        if client is None or not server_urls:
-            raise
+        pass
 
-    abs_path = str(path.resolve())
-    for base in server_urls:
-        try:
-            resp = client.get(
-                f"{base.rstrip('/')}/metadata",
-                params={"key": "file", "value": abs_path},
-            )
-            if resp.status_code != 200:
-                continue
-            results = resp.json().get("results") or []
-            if results:
-                build_id = results[0].get("buildid") or results[0].get("build_id")
-                if build_id:
-                    logger.info("Resolved build-id for %s via %s metadata", path.name, base)
-                    return str(build_id)
-        except Exception as exc:
-            logger.debug("metadata lookup failed for %s on %s: %s", abs_path, base, exc)
+    if client is not None and server_urls:
+        raise RuntimeError(
+            f"build-id для {path.name} не найден ни в ELF, ни в индексе серверов; "
+            "пересоберите testdata (scripts/generate_test_artifacts.py) "
+            "и выполните rescan на обоих debuginfod"
+        )
 
-    raise RuntimeError(
-        f"no build-id in {path} and not found via debuginfod metadata; "
-        "пересоберите бинарники (scripts/generate_test_artifacts.py) "
-        "и убедитесь, что оба сервера проиндексировали testdata"
-    )
+    raise RuntimeError(f"no build-id in {path}")
+
+
+def trigger_rescan(client: httpx.Client, base_url: str) -> dict[str, Any]:
+    """POST /admin/rescan on debuginfod server."""
+    try:
+        resp = client.post(f"{base_url.rstrip('/')}/admin/rescan", timeout=300.0)
+        if resp.status_code == 200:
+            try:
+                return {"status": "ok", **resp.json()}
+            except Exception:
+                return {"status": "ok", "body": resp.text[:200]}
+        return {"status": "error", "code": resp.status_code, "body": resp.text[:300]}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 def _fetch_latency_ms(
@@ -188,6 +264,27 @@ def _fetch_latency_ms(
     )
 
 
+def _fetch_latency_with_fallback(
+    client: httpx.Client,
+    base_url: str,
+    path: Path,
+    build_id: str,
+    runs: int,
+) -> LatencyStats:
+    try:
+        return _fetch_latency_ms(client, base_url, build_id, runs)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        alt_id = lookup_build_id_metadata(client, base_url, path)
+        if alt_id and alt_id != build_id:
+            return _fetch_latency_ms(client, base_url, alt_id, runs)
+        raise RuntimeError(
+            f"404: сервер {base_url} не знает build-id {build_id[:16]}… для {path.name}; "
+            "проверьте DEBUGINFOD_SCAN_PATH и выполните rescan"
+        ) from exc
+
+
 def run_benchmark(
     go_url: str,
     py_url: str,
@@ -195,6 +292,7 @@ def run_benchmark(
     runs: int = 3,
     pattern: str = "demo_v*",
     timeout_sec: float = 120.0,
+    rescan: bool = True,
 ) -> BenchmarkReport:
     """Run full comparison benchmark and return structured report."""
     binaries = discover_binaries(testdata, pattern)
@@ -204,11 +302,17 @@ def run_benchmark(
     report = BenchmarkReport(
         go_url=go_url,
         py_url=py_url,
-        testdata=str(testdata),
+        testdata=str(testdata.resolve()),
         runs=runs,
     )
 
     with httpx.Client(timeout=timeout_sec) as client:
+        if rescan:
+            report.rescan_results = {
+                "go": trigger_rescan(client, go_url),
+                "python": trigger_rescan(client, py_url),
+            }
+
         try:
             py_stats_resp = client.get(f"{py_url.rstrip('/')}/stats")
             if py_stats_resp.status_code == 200:
@@ -216,8 +320,9 @@ def run_benchmark(
         except Exception as exc:
             logger.warning("Failed to fetch Python /stats: %s", exc)
 
+        server_urls = [py_url, go_url]
         for path in binaries:
-            build_id = resolve_build_id(path, client, [py_url, go_url])
+            build_id = resolve_build_id(path, client, server_urls)
             entry = BinaryBenchmark(
                 label=path.name,
                 file=str(path.resolve()),
@@ -225,11 +330,15 @@ def run_benchmark(
                 file_size_bytes=path.stat().st_size,
             )
             try:
-                entry.go_latency_ms = _fetch_latency_ms(client, go_url, build_id, runs)
+                entry.go_latency_ms = _fetch_latency_with_fallback(
+                    client, go_url, path, build_id, runs
+                )
             except Exception as exc:
                 entry.go_error = str(exc)
             try:
-                entry.py_latency_ms = _fetch_latency_ms(client, py_url, build_id, runs)
+                entry.py_latency_ms = _fetch_latency_with_fallback(
+                    client, py_url, path, build_id, runs
+                )
             except Exception as exc:
                 entry.py_error = str(exc)
             report.binaries.append(entry)

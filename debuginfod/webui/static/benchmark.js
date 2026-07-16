@@ -32,6 +32,24 @@
     return (bytes / Math.pow(1024, i)).toFixed(1) + " " + units[i];
   }
 
+  function parseErrorMessage(text) {
+    if (!text) return "неизвестная ошибка";
+    try {
+      const data = JSON.parse(text);
+      if (data.detail) {
+        return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+      }
+    } catch (_e) {
+      /* plain text */
+    }
+    return text;
+  }
+
+  function formatError(err) {
+    if (err && err.message) return parseErrorMessage(err.message);
+    return String(err);
+  }
+
   function escapeHtml(s) {
     const div = document.createElement("div");
     div.textContent = s;
@@ -257,6 +275,7 @@
       py_url: document.getElementById("py-url").value.trim(),
       testdata: document.getElementById("testdata").value.trim(),
       runs: Number(document.getElementById("runs").value),
+      rescan: document.getElementById("rescan").checked,
     };
 
     try {
@@ -273,7 +292,7 @@
       renderReport(data.report);
       await loadHistory();
     } catch (err) {
-      statusEl.textContent = "Ошибка: " + err.message;
+      statusEl.textContent = "Ошибка: " + formatError(err);
       statusEl.classList.add("error");
     } finally {
       runBtn.disabled = false;
