@@ -14,6 +14,7 @@ from starlette.requests import Request as StarletteRequest
 
 from debuginfod import buildid
 from debuginfod.db import Database
+from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.delta_store import DeltaStore
 from debuginfod.elfsection import extract_first
 from debuginfod.metrics import MetricsCollector
@@ -47,6 +48,11 @@ def create_app(
     metrics: MetricsCollector | None = None,
     blob_dir: Path | None = None,
     reconstruct_cache_dir: Path | None = None,
+    benchmark_store: BenchmarkStore | None = None,
+    benchmark_go_url: str = "http://localhost:8002",
+    benchmark_py_url: str = "http://localhost:8003",
+    benchmark_testdata: Path | None = None,
+    scan_paths: list[Path] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="debuginfod-python", version="0.1.0")
     collector = metrics or MetricsCollector()
@@ -199,6 +205,11 @@ def create_app(
             metrics=collector,
             blob_dir=blob_dir or store.blob_dir,
             reconstruct_cache_dir=reconstruct_cache_dir or store.reconstruct_cache_dir,
+            benchmark_store=benchmark_store,
+            benchmark_go_url=benchmark_go_url,
+            benchmark_py_url=benchmark_py_url,
+            benchmark_testdata=benchmark_testdata,
+            scan_paths=scan_paths,
         )
 
     return app

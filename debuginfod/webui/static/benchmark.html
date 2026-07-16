@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Benchmark — debuginfod-python</title>
+  <link rel="stylesheet" href="/ui/static/app.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <h1>Benchmark</h1>
+      <p class="subtitle">Сравнение debuginfod-go и debuginfod-python (xdelta3)</p>
+    </div>
+    <div class="header-meta">
+      <a class="badge link" href="/ui/">дашборд</a>
+      <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <h2>Параметры запуска</h2>
+      <form id="bench-form" class="bench-form">
+        <label>
+          <span>Go URL</span>
+          <input type="url" id="go-url" name="go_url" value="http://localhost:8002" required>
+        </label>
+        <label>
+          <span>Python URL</span>
+          <input type="url" id="py-url" name="py_url" value="http://localhost:8003" required>
+        </label>
+        <label>
+          <span>Testdata</span>
+          <input type="text" id="testdata" name="testdata" value="testdata/versions" required>
+        </label>
+        <label>
+          <span>Прогонов</span>
+          <input type="number" id="runs" name="runs" value="3" min="1" max="20" required>
+        </label>
+        <button type="submit" id="run-btn">Запустить бенчмарк</button>
+      </form>
+      <p class="hint" id="bench-hint">Сравнивает латентность GET /buildid/…/executable и метрики хранения Python.</p>
+      <div id="bench-status" class="search-status"></div>
+    </section>
+
+    <section class="stats-grid" id="summary-grid" hidden aria-live="polite"></section>
+
+    <section class="panel chart-panel" id="latency-panel" hidden>
+      <h2>Латентность по версиям (среднее, ms)</h2>
+      <div class="chart-wrap">
+        <canvas id="latency-chart" width="900" height="360" role="img" aria-label="График латентности"></canvas>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-item go">debuginfod-go</span>
+        <span class="legend-item py">debuginfod-python</span>
+      </div>
+    </section>
+
+    <section class="panel chart-panel" id="storage-panel" hidden>
+      <h2>Использование диска</h2>
+      <div class="chart-wrap">
+        <canvas id="storage-chart" width="900" height="320" role="img" aria-label="График хранения"></canvas>
+      </div>
+      <p class="hint">Go: суммарный размер ELF в testdata. Python: фактически занято в blob-хранилище.</p>
+    </section>
+
+    <section class="panel" id="details-panel" hidden>
+      <h2>Детали по бинарникам</h2>
+      <div class="table-wrap">
+        <table class="results-table" id="details-table">
+          <thead>
+            <tr>
+              <th>версия</th>
+              <th>build-id</th>
+              <th>размер</th>
+              <th>Go ms</th>
+              <th>Python ms</th>
+              <th>ratio py/go</th>
+            </tr>
+          </thead>
+          <tbody id="details-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="history-panel" hidden>
+      <h2>История запусков</h2>
+      <div class="table-wrap">
+        <table class="results-table" id="history-table">
+          <thead>
+            <tr>
+              <th>время</th>
+              <th>бинарников</th>
+              <th>Go ms</th>
+              <th>Python ms</th>
+              <th>сжатие</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>CLI: <code>python scripts/compare_benchmark.py</code></span>
+  </footer>
+
+  <script src="/ui/static/benchmark.js"></script>
+</body>
+</html>

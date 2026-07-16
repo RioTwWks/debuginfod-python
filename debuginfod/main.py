@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
+from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.config import parse_args
 from debuginfod.db import Database
 from debuginfod.delta_store import DeltaStore
@@ -51,6 +52,9 @@ def main(argv: list[str] | None = None) -> None:
     if settings.scan_enabled:
         scan_runner.start()
 
+    benchmark_store = BenchmarkStore()
+    py_url = f"http://localhost:{settings.port}"
+
     app = create_app(
         db=db,
         store=store,
@@ -62,6 +66,11 @@ def main(argv: list[str] | None = None) -> None:
         metrics=metrics,
         blob_dir=settings.blob_dir,
         reconstruct_cache_dir=settings.reconstruct_cache_dir,
+        benchmark_store=benchmark_store,
+        benchmark_go_url=settings.benchmark_go_url,
+        benchmark_py_url=py_url,
+        benchmark_testdata=settings.benchmark_testdata,
+        scan_paths=settings.scan_paths,
     )
 
     try:
