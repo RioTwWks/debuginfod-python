@@ -26,6 +26,9 @@ debuginfod = "debuginfod.main:main"
 where = ["."]
 include = ["debuginfod*"]
 
+[tool.setuptools.package-data]
+"debuginfod.webui" = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

@@ -26,6 +26,7 @@ class Settings:
     metadata_page_size: int = 100
     admin_key: str = ""
     scan_enabled: bool = True
+    ui_enabled: bool = True
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -76,6 +77,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         metadata_page_size=_env_int("DEBUGINFOD_METADATA_PAGE_SIZE", 100),
         admin_key=os.getenv("DEBUGINFOD_ADMIN_KEY", ""),
         scan_enabled=_env_bool("DEBUGINFOD_SCAN_ENABLED", True),
+        ui_enabled=_env_bool("DEBUGINFOD_UI_ENABLED", True),
     )
 
 
@@ -90,6 +92,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, Setti
     parser.add_argument("--xdelta3-path", help="Path to xdelta3 binary")
     parser.add_argument("--env-file", default=None, help="Alternate .env file")
     parser.add_argument("--no-scan", action="store_true", help="Disable background rescan")
+    parser.add_argument("--no-ui", action="store_true", help="Disable Web UI dashboard")
     args = parser.parse_args(argv)
 
     settings = load_settings(args.env_file)
@@ -110,6 +113,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, Setti
         overrides["xdelta3_path"] = args.xdelta3_path
     if args.no_scan:
         overrides["scan_enabled"] = False
+    if args.no_ui:
+        overrides["ui_enabled"] = False
 
     if overrides:
         settings = Settings(**{**settings.__dict__, **overrides})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 import uvicorn
 
@@ -11,6 +12,7 @@ from debuginfod.config import parse_args
 from debuginfod.db import Database
 from debuginfod.delta_store import DeltaStore
 from debuginfod.indexer import Indexer
+from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
 from debuginfod.webapi import create_app
 
@@ -39,8 +41,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     store.verify_xdelta3()
 
+    metrics = MetricsCollector()
     indexer = Indexer(db=db, store=store, scan_paths=settings.scan_paths)
-    scan_runner = ScanRunner(indexer=indexer, interval_sec=settings.rescan_interval_sec)
+    scan_runner = ScanRunner(
+        indexer=indexer,
+        interval_sec=settings.rescan_interval_sec,
+        metrics=metrics,
+    )
     if settings.scan_enabled:
         scan_runner.start()
 
@@ -51,6 +58,10 @@ def main(argv: list[str] | None = None) -> None:
         metadata_maxtime_sec=settings.metadata_maxtime_sec,
         metadata_page_size=settings.metadata_page_size,
         admin_key=settings.admin_key,
+        ui_enabled=settings.ui_enabled,
+        metrics=metrics,
+        blob_dir=settings.blob_dir,
+        reconstruct_cache_dir=settings.reconstruct_cache_dir,
     )
 
     try:

@@ -8,6 +8,7 @@ import time
 from typing import Callable
 
 from debuginfod.indexer import Indexer, ScanStats
+from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,12 @@ class ScanRunner:
         indexer: Indexer,
         interval_sec: int,
         on_complete: Callable[[ScanStats], None] | None = None,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self.indexer = indexer
         self.interval_sec = interval_sec
         self.on_complete = on_complete
+        self.metrics = metrics
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._ready = False
@@ -40,10 +43,19 @@ class ScanRunner:
 
     def run_once(self) -> ScanStats:
         logger.info("Starting scan")
+        started = time.perf_counter()
         stats = self.indexer.scan()
+        duration = time.perf_counter() - started
         with self._lock:
             self._last_stats = stats
             self._ready = True
+        if self.metrics is not None:
+            self.metrics.record_scan(
+                indexed=stats.files_indexed,
+                skipped=stats.files_skipped,
+                errors=stats.errors,
+                duration_sec=duration,
+            )
         logger.info(
             "Scan complete: indexed=%d skipped=%d deltas=%d full=%d errors=%d",
             stats.files_indexed,
