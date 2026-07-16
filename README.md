@@ -58,6 +58,22 @@ debuginfod -s /usr/lib/debug -p 8003
 
 - `GET /stats` — статистика хранения (full vs delta, сэкономленные байты, compression ratio)
 
+## Web UI
+
+Дашборд по аналогии с [debuginfod-go](https://github.com/RioTwWks/debuginfod-go): **http://localhost:8003/ui/**
+
+- Статистика индекса (артефакты, сканирование, HTTP-запросы)
+- Метрики xdelta3-хранилища (сэкономленные байты, коэффициент сжатия)
+- Поиск артефактов: build-id (префикс), glob, file
+- Ссылки на скачивание debuginfo/executable
+
+API дашборда:
+
+- `GET /ui/api/stats`
+- `GET /ui/api/search?key=buildid|glob|file&...`
+
+Отключить UI: `DEBUGINFOD_UI_ENABLED=false` или флаг `--no-ui`.
+
 Пример для GDB/LLDB:
 
 ```bash
@@ -123,6 +139,7 @@ python scripts/compare_benchmark.py \
 | `DEBUGINFOD_DELTA_MIN_RATIO` | `0.85` | Порог: delta сохраняется, если patch < ratio × original |
 | `DEBUGINFOD_XDELTA3_PATH` | `xdelta3` | Путь к бинарнику xdelta3 |
 | `DEBUGINFOD_RESCAN_INTERVAL` | `3600` | Интервал фонового rescan (сек) |
+| `DEBUGINFOD_UI_ENABLED` | `true` | Web UI на `/ui/` |
 
 ## Тесты
 

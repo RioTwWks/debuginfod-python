@@ -5,15 +5,18 @@ from __future__ import annotations
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.requests import Request as StarletteRequest
 
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.delta_store import DeltaStore
 from debuginfod.elfsection import extract_first
+from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
 
 logger = logging.getLogger(__name__)
@@ -40,8 +43,19 @@ def create_app(
     metadata_maxtime_sec: float = 5.0,
     metadata_page_size: int = 100,
     admin_key: str = "",
+    ui_enabled: bool = True,
+    metrics: MetricsCollector | None = None,
+    blob_dir: Path | None = None,
+    reconstruct_cache_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="debuginfod-python", version="0.1.0")
+    collector = metrics or MetricsCollector()
+
+    @app.middleware("http")
+    async def record_http_requests(request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        collector.record_http()
+        return response
 
     def _stream_content(content_hash: str) -> StreamingResponse:
         try:
@@ -175,5 +189,16 @@ def create_app(
         if artifact is None:
             raise HTTPException(status_code=404, detail="not found")
         return _stream_content(artifact.content_hash)
+
+    if ui_enabled:
+        from debuginfod.webui import register_webui
+
+        register_webui(
+            app,
+            db=db,
+            metrics=collector,
+            blob_dir=blob_dir or store.blob_dir,
+            reconstruct_cache_dir=reconstruct_cache_dir or store.reconstruct_cache_dir,
+        )
 
     return app

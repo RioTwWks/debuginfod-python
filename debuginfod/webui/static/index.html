@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>debuginfod-python</title>
+  <link rel="stylesheet" href="/ui/static/app.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <h1>debuginfod-python</h1>
+      <p class="subtitle">Статистика индекса, xdelta3-хранилище и поиск артефактов</p>
+    </div>
+    <div class="header-meta">
+      <span id="uptime" class="badge">uptime —</span>
+      <a class="badge link" href="/healthz" target="_blank" rel="noopener">healthz</a>
+      <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="stats-grid" id="stats-grid" aria-live="polite">
+      <div class="stat-card loading"><span class="stat-label">Загрузка…</span></div>
+    </section>
+
+    <section class="panel">
+      <h2>Последнее сканирование</h2>
+      <div class="scan-row" id="scan-info">—</div>
+    </section>
+
+    <section class="panel">
+      <h2>Поиск артефактов</h2>
+      <div class="search-mode" role="tablist" aria-label="Режим поиска">
+        <button type="button" class="mode-btn active" data-key="buildid" role="tab" aria-selected="true">build-id</button>
+        <button type="button" class="mode-btn" data-key="glob" role="tab" aria-selected="false">glob</button>
+        <button type="button" class="mode-btn" data-key="file" role="tab" aria-selected="false">file</button>
+      </div>
+      <form id="search-form" class="search-form">
+        <input
+          type="search"
+          id="search-input"
+          name="q"
+          placeholder="Префикс build-id (hex), например deadbeef"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <button type="submit">Найти</button>
+      </form>
+      <p class="hint" id="search-hint">Пустой запрос — первые 50 артефактов по build-id (префикс).</p>
+      <div id="search-status" class="search-status"></div>
+      <div class="table-wrap">
+        <table class="results-table" id="results-table" hidden>
+          <thead>
+            <tr>
+              <th>build-id</th>
+              <th>тип</th>
+              <th>файл</th>
+              <th>kind</th>
+              <th>ссылки</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+      <button type="button" id="load-more" class="load-more" hidden>Ещё результаты</button>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>debuginfod HTTP API: <code>/metadata?key=glob&amp;value=/bin/*</code></span>
+  </footer>
+
+  <script src="/ui/static/app.js"></script>
+</body>
+</html>

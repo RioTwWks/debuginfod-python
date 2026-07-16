@@ -50,6 +50,15 @@ class SourceRecord:
 
 
 @dataclass(frozen=True)
+class CountStats:
+    artifacts_total: int
+    artifacts_executable: int
+    artifacts_debuginfo: int
+    sources_total: int
+    scanned_files_total: int
+
+
+@dataclass(frozen=True)
 class MetadataResult:
     buildid: str
     type: str
@@ -349,6 +358,89 @@ class Database:
             """,
             (key, delta),
         )
+
+    def count_stats(self) -> CountStats:
+        """Aggregate DB counters for Web UI."""
+        artifacts_total = self._conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        artifacts_executable = self._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE type = 'executable'"
+        ).fetchone()[0]
+        artifacts_debuginfo = self._conn.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE type = 'debuginfo'"
+        ).fetchone()[0]
+        sources_total = self._conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        scanned_files_total = self._conn.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
+        return CountStats(
+            artifacts_total=artifacts_total,
+            artifacts_executable=artifacts_executable,
+            artifacts_debuginfo=artifacts_debuginfo,
+            sources_total=sources_total,
+            scanned_files_total=scanned_files_total,
+        )
+
+    def search_buildid_for_ui(self, query: str, limit: int = 50) -> list[MetadataResult]:
+        """Search artifacts by build-id prefix for Web UI."""
+        limit = max(1, min(limit, 200))
+        normalized = query.strip().lower()
+        if normalized.startswith("0x"):
+            normalized = normalized[2:]
+
+        if not normalized:
+            rows = self._conn.execute(
+                """
+                SELECT build_id, type, file_path, build_id_kind, raw_build_id
+                FROM artifacts
+                ORDER BY build_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            pattern = normalized + "%"
+            rows = self._conn.execute(
+                """
+                SELECT build_id, type, file_path, build_id_kind, raw_build_id
+                FROM artifacts
+                WHERE build_id LIKE ? OR lower(raw_build_id) LIKE ?
+                ORDER BY build_id
+                LIMIT ?
+                """,
+                (pattern, pattern, limit),
+            ).fetchall()
+
+        return [
+            MetadataResult(
+                buildid=row["build_id"],
+                type=row["type"],
+                file=row["file_path"],
+                buildid_kind=row["build_id_kind"] or "",
+                raw_buildid=row["raw_build_id"] or "",
+            )
+            for row in rows
+        ]
+
+    def search_metadata_ui(
+        self,
+        key: str,
+        value: str,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[MetadataResult], bool, int]:
+        """Search artifacts for Web UI glob/file modes."""
+        limit = max(1, min(limit, 200))
+        results, complete, next_offset = self.search_metadata(key, value, offset, limit)
+        ui_results = [
+            MetadataResult(
+                buildid=r.buildid,
+                type=r.type,
+                file=r.file,
+                archive=r.archive,
+                buildid_kind=r.buildid_kind,
+                raw_buildid=r.raw_buildid,
+            )
+            for r in results
+        ]
+        return ui_results, complete, next_offset
 
     def get_stats(self) -> dict[str, Any]:
         rows = self._conn.execute("SELECT key, value FROM storage_stats").fetchall()
