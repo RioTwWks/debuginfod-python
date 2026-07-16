@@ -3,6 +3,7 @@
   const runBtn = document.getElementById("run-btn");
   const statusEl = document.getElementById("bench-status");
   const hintEl = document.getElementById("bench-hint");
+  const warningsEl = document.getElementById("bench-warnings");
   const summaryGrid = document.getElementById("summary-grid");
   const latencyPanel = document.getElementById("latency-panel");
   const storagePanel = document.getElementById("storage-panel");
@@ -137,6 +138,28 @@
     });
   }
 
+  function renderWarnings(report) {
+    const warnings = report.warnings || [];
+    const goRescan = (report.rescan_results || {}).go;
+    if (goRescan && goRescan.status === "error" && goRescan.code === 401) {
+      if (!warnings.some(function (w) { return w.indexOf("401") >= 0; })) {
+        warnings.push(
+          "Go rescan: 401 — укажите Go admin key (тот же, что DEBUGINFOD_ADMIN_KEY у debuginfod-go)"
+        );
+      }
+    }
+    if (warnings.length === 0) {
+      warningsEl.hidden = true;
+      warningsEl.innerHTML = "";
+      return;
+    }
+    warningsEl.innerHTML =
+      "<strong>Предупреждения</strong><ul>" +
+      warnings.map(function (w) { return "<li>" + escapeHtml(w) + "</li>"; }).join("") +
+      "</ul>";
+    warningsEl.hidden = false;
+  }
+
   function renderSummary(summary) {
     const cards = [
       { label: "Бинарников", value: summary.binary_count, highlight: true },
@@ -186,8 +209,12 @@
   function renderDetails(report) {
     detailsBody.innerHTML = report.binaries
       .map(function (b) {
-        const goMs = b.go_latency_ms ? b.go_latency_ms.mean.toFixed(1) : (b.go_error ? "err" : "—");
-        const pyMs = b.py_latency_ms ? b.py_latency_ms.mean.toFixed(1) : (b.py_error ? "err" : "—");
+        const goMs = b.go_latency_ms
+          ? b.go_latency_ms.mean.toFixed(1)
+          : (b.go_error ? '<span class="cell-error" title="' + escapeHtml(b.go_error) + '">err</span>' : "—");
+        const pyMs = b.py_latency_ms
+          ? b.py_latency_ms.mean.toFixed(1)
+          : (b.py_error ? '<span class="cell-error" title="' + escapeHtml(b.py_error) + '">err</span>' : "—");
         let ratio = "—";
         if (b.go_latency_ms && b.py_latency_ms && b.go_latency_ms.mean > 0) {
           ratio = (b.py_latency_ms.mean / b.go_latency_ms.mean).toFixed(2) + "×";
@@ -224,6 +251,7 @@
   }
 
   function renderReport(report) {
+    renderWarnings(report);
     renderSummary(report.summary);
     renderCharts(report);
     renderDetails(report);
@@ -242,7 +270,14 @@
       if (data.binary_count === 0) {
         hintEl.textContent = "В testdata нет demo_v* — запустите scripts/generate_test_artifacts.py";
       } else {
-        hintEl.textContent = "Найдено бинарников: " + data.binary_count + " (" + data.binaries.join(", ") + ")";
+        let hint = "Найдено бинарников: " + data.binary_count + " (" + data.binaries.join(", ") + ")";
+        if (data.scan_paths && data.scan_paths.length) {
+          hint += ". Scan paths сервера: " + data.scan_paths.join(", ");
+        }
+        if (!data.go_admin_key_configured) {
+          hint += ". Go admin key не задан в .env — rescan Go может вернуть 401.";
+        }
+        hintEl.textContent = hint;
       }
     } catch (_err) {
       /* ignore */
@@ -276,6 +311,8 @@
       testdata: document.getElementById("testdata").value.trim(),
       runs: Number(document.getElementById("runs").value),
       rescan: document.getElementById("rescan").checked,
+      go_admin_key: document.getElementById("go-admin-key").value,
+      py_admin_key: document.getElementById("py-admin-key").value,
     };
 
     try {

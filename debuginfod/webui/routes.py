@@ -30,6 +30,8 @@ class BenchmarkRunRequest(BaseModel):
     runs: int = Field(default=3, ge=1, le=20)
     pattern: str = "demo_v*"
     rescan: bool = True
+    go_admin_key: str = ""
+    py_admin_key: str = ""
 
 
 def _dir_size(path: Path) -> int:
@@ -67,6 +69,8 @@ def register_webui(
     benchmark_go_url: str = "http://localhost:8002",
     benchmark_py_url: str = "http://localhost:8003",
     benchmark_testdata: Path | None = None,
+    benchmark_go_admin_key: str = "",
+    benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
 ) -> None:
     """Mount /ui dashboard routes on the FastAPI app."""
@@ -105,6 +109,8 @@ def register_webui(
             "scan_paths": [str(p) for p in (scan_paths or [])],
             "binary_count": len(discovered),
             "binaries": [p.name for p in discovered],
+            "go_admin_key_configured": bool(benchmark_go_admin_key),
+            "py_admin_key_configured": bool(benchmark_py_admin_key),
         }
 
     @router.get("/ui/api/benchmark/last", include_in_schema=False)
@@ -126,6 +132,8 @@ def register_webui(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         try:
+            go_key = body.go_admin_key or benchmark_go_admin_key
+            py_key = body.py_admin_key or benchmark_py_admin_key
             report = await asyncio.to_thread(
                 run_benchmark,
                 body.go_url,
@@ -135,6 +143,8 @@ def register_webui(
                 body.pattern,
                 120.0,
                 body.rescan,
+                go_key,
+                py_key,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -132,21 +132,25 @@ python scripts/generate_test_artifacts.py -o testdata/versions -n 10
 python scripts/compare_benchmark.py \
   --go-url http://localhost:8002 \
   --py-url http://localhost:8003 \
-  --testdata testdata/versions
+  --testdata testdata/versions \
+  --go-admin-key "$DEBUGINFOD_ADMIN_KEY"
 ```
 
-Убедитесь, что оба сервера запущены с `DEBUGINFOD_SCAN_PATH=testdata/versions` (или абсолютным путём к нему).
+Если у debuginfod-go включён `DEBUGINFOD_ADMIN_KEY`, передайте тот же ключ через `--go-admin-key` или переменную `DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY`. Без ключа rescan Go вернёт **401**, и латентность Go в UI может показывать `err` (разные build-id на серверах).
+
+Убедитесь, что **оба** сервера запущены с `DEBUGINFOD_SCAN_PATH=testdata/versions` (или абсолютным путём к нему). Иначе Python проиндексирует `/usr/lib/debug` и другие пути — в дашборде будет «303 файла», а метрики хранения не сравнимы с Go.
 
 Скрипт выводит JSON с:
 
 - латентностью загрузки executable для каждой версии (Go vs Python);
-- статистикой хранения Python-сервера (`/stats`).
+- метриками хранения **только по testdata** (не глобальный `/stats` Python-сервера);
+- `warnings` — подсказки (401 rescan, лишние scan paths, расхождение build-id).
 
 ### Метрики для презентации коллегам
 
-1. **Диск**: `total_stored_bytes` vs суммарный размер всех версий (Go хранит каждую копию на диске в scan path).
-2. **Сжатие**: доля `delta` blobs, `compression_ratio` в `/stats` и `/metadata`.
-3. **Латентность**: среднее время первого и повторного `GET /buildid/.../executable` (у Python есть overhead реконструкции xdelta3).
+1. **Диск**: суммарный размер ELF в testdata (Go) vs оценка blob-хранилища Python для тех же файлов.
+2. **Сжатие**: `compression_ratio` по testdata и `storage_kind` (delta/full) в `/metadata`.
+3. **Латентность**: среднее время `GET /buildid/.../executable` (у Python есть overhead реконструкции xdelta3).
 4. **CPU/RAM**: наблюдение через `htop` при массовых запросах.
 
 ## Конфигурация
@@ -164,6 +168,8 @@ python scripts/compare_benchmark.py \
 | `DEBUGINFOD_UI_ENABLED` | `true` | Web UI на `/ui/` |
 | `DEBUGINFOD_BENCHMARK_GO_URL` | `http://localhost:8002` | URL debuginfod-go для бенчмарка |
 | `DEBUGINFOD_BENCHMARK_TESTDATA` | `testdata/versions` | Каталог с demo_v* для бенчмарка |
+| `DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY` | — | X-Admin-Token для rescan Go при бенчмарке |
+| `DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY` | `DEBUGINFOD_ADMIN_KEY` | X-Admin-Token для rescan Python |
 
 ## Тесты
 

@@ -16,7 +16,10 @@ from debuginfod.benchmark import (
     discover_binaries,
     extract_build_id,
     resolve_build_id,
+    resolve_build_id_for_server,
     run_benchmark,
+    trigger_rescan,
+    _collect_warnings,
 )
 
 
@@ -49,6 +52,7 @@ def test_benchmark_report_summary() -> None:
             file="/tmp/demo_v1",
             build_id="abc",
             file_size_bytes=500,
+            py_stored_bytes=200,
             go_latency_ms=LatencyStats(10, 8, 12),
             py_latency_ms=LatencyStats(30, 25, 35),
         )
@@ -57,7 +61,8 @@ def test_benchmark_report_summary() -> None:
     assert summary["go_mean_latency_ms"] == 10
     assert summary["py_mean_latency_ms"] == 30
     assert summary["latency_ratio_py_vs_go"] == 3.0
-    assert summary["py_compression_ratio"] == 0.2
+    assert summary["py_stored_bytes"] == 200
+    assert summary["py_compression_ratio"] == 0.4
 
 
 def test_extract_build_id_from_gcc_binary(tmp_path: Path) -> None:
@@ -113,11 +118,13 @@ def test_discover_binaries_natural_sort(tmp_path: Path) -> None:
 
 
 @patch("debuginfod.benchmark.trigger_rescan", return_value={"status": "ok"})
-@patch("debuginfod.benchmark.resolve_build_id", return_value="deadbeef")
+@patch("debuginfod.benchmark.lookup_artifact_metadata", return_value=None)
+@patch("debuginfod.benchmark.resolve_build_id_for_server", return_value="deadbeef")
 @patch("debuginfod.benchmark._fetch_latency_with_fallback")
 def test_run_benchmark(
     mock_latency: MagicMock,
     _mock_build_id: MagicMock,
+    _mock_meta: MagicMock,
     _mock_rescan: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -144,3 +151,65 @@ def test_run_benchmark(
     assert report.binaries[0].py_latency_ms is not None
     payload = report.to_dict()
     assert payload["summary"]["binary_count"] == 1
+
+
+def test_trigger_rescan_sends_admin_header() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["token"] = request.headers.get("X-Admin-Token", "")
+        return httpx.Response(200, json={"status": "ok"})
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="http://go") as client:
+        result = trigger_rescan(client, "http://go", admin_key="secret")
+    assert result["status"] == "ok"
+    assert captured["token"] == "secret"
+
+
+def test_collect_warnings_go_401() -> None:
+    report = BenchmarkReport(
+        go_url="http://go",
+        py_url="http://py",
+        testdata="/tmp",
+        runs=1,
+        rescan_results={"go": {"status": "error", "code": 401, "body": "unauthorized\n"}},
+    )
+    warnings = _collect_warnings(report)
+    assert any("401" in w for w in warnings)
+
+
+def test_resolve_build_id_for_server_per_url(tmp_path: Path) -> None:
+    binary = tmp_path / "demo_v1"
+    binary.write_bytes(b"not elf")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "go":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"buildid": "go" * 20, "type": "executable", "file": str(binary.resolve())}
+                    ],
+                    "complete": True,
+                },
+            )
+        if request.url.host == "py":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"buildid": "py" * 20, "type": "executable", "file": str(binary.resolve())}
+                    ],
+                    "complete": True,
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        go_id = resolve_build_id_for_server(client, "http://go", binary)
+        py_id = resolve_build_id_for_server(client, "http://py", binary)
+    assert go_id == "go" * 20
+    assert py_id == "py" * 20
+    assert go_id != py_id
