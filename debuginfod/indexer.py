@@ -12,6 +12,7 @@ from elftools.elf.elffile import ELFFile
 from debuginfod import buildid
 from debuginfod.db import ArtifactRecord, Database, SourceRecord
 from debuginfod.delta_store import DeltaStore
+from debuginfod.quik_indexer import QuikIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,41 @@ class ScanStats:
     artifacts_added: int = 0
     deltas_stored: int = 0
     full_stored: int = 0
+    quik_batches: int = 0
+    quik_verify_passed: int = 0
+    quik_verify_failed: int = 0
+    quik_bytes_saved: int = 0
 
 
 class Indexer:
     """Walk scan paths and index ELF artifacts with xdelta3 storage."""
 
-    def __init__(self, db: Database, store: DeltaStore, scan_paths: list[Path]) -> None:
+    def __init__(
+        self,
+        db: Database,
+        store: DeltaStore,
+        scan_paths: list[Path],
+        quik_indexer: QuikIndexer | None = None,
+    ) -> None:
         self.db = db
         self.store = store
         self.scan_paths = [p.resolve() for p in scan_paths]
+        self.quik_indexer = quik_indexer
 
     def scan(self) -> ScanStats:
         stats = ScanStats()
+
+        if self.quik_indexer is not None:
+            quik_stats = self.quik_indexer.scan()
+            stats.files_indexed += quik_stats.files_indexed
+            stats.deltas_stored += quik_stats.deltas_stored
+            stats.full_stored += quik_stats.full_stored
+            stats.errors += quik_stats.errors
+            stats.quik_batches = quik_stats.batches_seen
+            stats.quik_verify_passed = quik_stats.verify_passed
+            stats.quik_verify_failed = quik_stats.verify_failed
+            stats.quik_bytes_saved = quik_stats.bytes_saved
+
         elf_files: list[Path] = []
         source_files: list[Path] = []
 

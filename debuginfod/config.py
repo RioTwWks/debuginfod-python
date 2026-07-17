@@ -31,6 +31,14 @@ class Settings:
     benchmark_testdata: Path = Path("testdata/versions")
     benchmark_go_admin_key: str = ""
     benchmark_py_admin_key: str = ""
+    input_path: Path = Path("incoming")
+    work_path: Path = Path("store")
+    dedup_projects: tuple[str, ...] = ()
+    dedup_enabled: bool = False
+    seven_zip_path: str = ""
+    delta_lzma: bool = False
+    database_url: str = ""
+    remove_original_after_dedup: bool = True
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -64,6 +72,9 @@ def load_settings(env_file: str | None = None) -> Settings:
     scan_raw = os.getenv("DEBUGINFOD_SCAN_PATH", ".")
     scan_paths = [Path(p.strip()) for p in scan_raw.split(",") if p.strip()]
 
+    dedup_raw = os.getenv("DEBUGINFOD_DEDUP_PROJECTS", "")
+    dedup_projects = tuple(p.strip() for p in dedup_raw.split(",") if p.strip())
+
     return Settings(
         db_path=Path(os.getenv("DEBUGINFOD_DB_PATH", "debuginfod.sqlite")),
         scan_paths=scan_paths,
@@ -89,6 +100,14 @@ def load_settings(env_file: str | None = None) -> Settings:
             "DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY",
             os.getenv("DEBUGINFOD_ADMIN_KEY", ""),
         ),
+        input_path=Path(os.getenv("DEBUGINFOD_INPUT_PATH", "incoming")),
+        work_path=Path(os.getenv("DEBUGINFOD_WORK_PATH", "store")),
+        dedup_projects=dedup_projects,
+        dedup_enabled=_env_bool("DEBUGINFOD_DEDUP_ENABLED", bool(dedup_projects)),
+        seven_zip_path=os.getenv("DEBUGINFOD_SEVEN_ZIP_PATH", ""),
+        delta_lzma=_env_bool("DEBUGINFOD_DELTA_LZMA", False),
+        database_url=os.getenv("DEBUGINFOD_DATABASE_URL", ""),
+        remove_original_after_dedup=_env_bool("DEBUGINFOD_REMOVE_ORIGINAL_AFTER_DEDUP", True),
     )
 
 

@@ -170,6 +170,63 @@ python scripts/compare_benchmark.py \
 | `DEBUGINFOD_BENCHMARK_TESTDATA` | `testdata/versions` | Каталог с demo_v* для бенчмарка |
 | `DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY` | — | X-Admin-Token для rescan Go при бенчмарке |
 | `DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY` | `DEBUGINFOD_ADMIN_KEY` | X-Admin-Token для rescan Python |
+| `DEBUGINFOD_INPUT_PATH` | `incoming` | Входная директория Quik-сборок |
+| `DEBUGINFOD_WORK_PATH` | `store` | Рабочее хранилище после индексации |
+| `DEBUGINFOD_DEDUP_PROJECTS` | — | Проекты с дедупликацией (через запятую) |
+| `DEBUGINFOD_DEDUP_ENABLED` | `false` | Включить Quik pipeline при scan |
+| `DEBUGINFOD_DATABASE_URL` | — | PostgreSQL URL (prod); без URL — SQLite |
+| `DEBUGINFOD_SEVEN_ZIP_PATH` | `7z` | Путь к 7z для `*.7zip.debug` |
+| `DEBUGINFOD_DELTA_LZMA` | `false` | LZMA поверх xdelta3 patch |
+
+## Quik deduplication (DEVOPS-110)
+
+Алгоритм из `filediffs.ps1`, встроенный в индексацию:
+
+1. Распаковка `*.7zip.debug` (7z)
+2. Группировка сборок `build_N_*` по commit tag из ELF `.comment`
+3. Master = минимальный номер сборки в группе
+4. xdelta3 delta для остальных + **обязательная** round-trip проверка
+5. Отдача через debuginfod HTTP с реконструкцией на лету
+
+```bash
+DEBUGINFOD_INPUT_PATH=/data/incoming \
+DEBUGINFOD_WORK_PATH=/var/lib/debuginfod/store \
+DEBUGINFOD_DEDUP_PROJECTS=QuikServer,Front \
+DEBUGINFOD_DEDUP_ENABLED=true \
+DEBUGINFOD_SCAN_PATH=/var/lib/debuginfod/store \
+python -m debuginfod
+```
+
+Структура входной директории:
+
+```text
+incoming/
+  QuikServer/
+    build_1_2025-02_27_11_24_37/
+    build_65_2025-03_03_19_32_08/
+  Front/
+    build_2_...
+```
+
+Отчёт сравнения с Go:
+
+```bash
+python scripts/quik_storage_report.py --testdata incoming/QuikServer --python-blob-dir .debuginfod-blobs
+```
+
+### Production (systemd)
+
+См. `deploy/debuginfod-python.service` и `deploy/debuginfod.env.example`.
+
+```bash
+sudo cp deploy/debuginfod.env.example /etc/debuginfod/debuginfod.env
+sudo cp deploy/debuginfod-python.service /etc/systemd/system/
+sudo systemctl enable --now debuginfod-python
+```
+
+Зависимости: `deploy/install-deps-astra.sh` или `deploy/install-deps-redos.sh`.
+
+PostgreSQL: `pip install -e '.[postgres]'`, задайте `DEBUGINFOD_DATABASE_URL`.
 
 ## Тесты
 

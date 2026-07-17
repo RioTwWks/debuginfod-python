@@ -37,6 +37,10 @@ class ArtifactRecord:
     original_size: int = 0
     stored_size: int = 0
     base_build_id: str = ""
+    project_name: str = ""
+    batch_name: str = ""
+    is_master: bool = False
+    file_mask: str = ""
 
 
 @dataclass(frozen=True)
@@ -72,15 +76,36 @@ class MetadataResult:
 
 
 class Database:
-    """SQLite-backed metadata store."""
+    """SQLite or PostgreSQL metadata store."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, database_url: str = "") -> None:
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._dialect = "sqlite"
+        url = database_url.strip()
+        if url.startswith("postgresql://") or url.startswith("postgres://"):
+            try:
+                import psycopg
+                from psycopg.rows import dict_row
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PostgreSQL requires psycopg: pip install 'debuginfod-python[postgres]'"
+                ) from exc
+            self._conn = psycopg.connect(url, row_factory=dict_row, autocommit=False)
+            self._dialect = "postgresql"
+        else:
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
         self._migrate()
 
+    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        if self._dialect == "postgresql":
+            sql = sql.replace("?", "%s")
+        return self._conn.execute(sql, params)
+
     def _migrate(self) -> None:
+        if self._dialect == "postgresql":
+            self._migrate_postgres()
+            return
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS blobs (
@@ -137,9 +162,66 @@ class Database:
                 key TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                dedup_enabled INTEGER NOT NULL DEFAULT 1,
+                input_subpath TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS build_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT NOT NULL,
+                batch_name TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                build_number INTEGER NOT NULL,
+                commit_tag_id TEXT NOT NULL DEFAULT '',
+                is_master INTEGER NOT NULL DEFAULT 0,
+                indexed_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(project_name, batch_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_build_batches_project ON build_batches(project_name);
+
+            CREATE TABLE IF NOT EXISTS dedup_manifest (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT NOT NULL,
+                batch_name TEXT NOT NULL,
+                file_mask TEXT NOT NULL,
+                master_build_number INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                master_hash TEXT NOT NULL,
+                verify_ok INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(project_name, batch_name, file_mask)
+            );
             """
         )
+        self._ensure_artifact_columns()
         self._conn.commit()
+
+    def _migrate_postgres(self) -> None:
+        from debuginfod.pg_schema import POSTGRES_SCHEMA
+
+        for statement in POSTGRES_SCHEMA.split(";"):
+            sql = statement.strip()
+            if sql:
+                self._conn.execute(sql)
+        self._conn.commit()
+
+    def _ensure_artifact_columns(self) -> None:
+        if self._dialect == "postgresql":
+            return
+        """Add Quik columns to artifacts on existing databases."""
+        rows = self._execute("PRAGMA table_info(artifacts)").fetchall()
+        existing = {row[1] for row in rows}
+        additions = {
+            "project_name": "TEXT NOT NULL DEFAULT ''",
+            "batch_name": "TEXT NOT NULL DEFAULT ''",
+            "is_master": "INTEGER NOT NULL DEFAULT 0",
+            "file_mask": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, typedef in additions.items():
+            if column not in existing:
+                self._execute(f"ALTER TABLE artifacts ADD COLUMN {column} {typedef}")
 
     def close(self) -> None:
         self._conn.close()
@@ -154,7 +236,7 @@ class Database:
             raise
 
     def needs_scan(self, path: str, mtime_ns: int, size: int) -> bool:
-        row = self._conn.execute(
+        row = self._execute(
             "SELECT mtime_ns, size FROM scanned_files WHERE path = ?",
             (path,),
         ).fetchone()
@@ -163,7 +245,7 @@ class Database:
         return row["mtime_ns"] != mtime_ns or row["size"] != size
 
     def mark_scanned(self, path: str, mtime_ns: int, size: int, kind: str) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO scanned_files (path, mtime_ns, size, kind)
             VALUES (?, ?, ?, ?)
@@ -176,7 +258,7 @@ class Database:
         )
 
     def get_blob(self, content_hash: str) -> BlobRecord | None:
-        row = self._conn.execute(
+        row = self._execute(
             "SELECT * FROM blobs WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
@@ -192,7 +274,7 @@ class Database:
         )
 
     def upsert_blob(self, blob: BlobRecord) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO blobs (content_hash, storage_kind, stored_path, original_size, stored_size, base_hash)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -214,12 +296,13 @@ class Database:
         )
 
     def upsert_artifact(self, record: ArtifactRecord) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO artifacts (
                 build_id, type, file_path, content_hash, storage_kind,
-                build_id_kind, raw_build_id, family_key, base_build_id, mtime_ns
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                build_id_kind, raw_build_id, family_key, base_build_id, mtime_ns,
+                project_name, batch_name, is_master, file_mask
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(build_id, type) DO UPDATE SET
                 file_path = excluded.file_path,
                 content_hash = excluded.content_hash,
@@ -228,7 +311,11 @@ class Database:
                 raw_build_id = excluded.raw_build_id,
                 family_key = excluded.family_key,
                 base_build_id = excluded.base_build_id,
-                mtime_ns = excluded.mtime_ns
+                mtime_ns = excluded.mtime_ns,
+                project_name = excluded.project_name,
+                batch_name = excluded.batch_name,
+                is_master = excluded.is_master,
+                file_mask = excluded.file_mask
             WHERE excluded.mtime_ns >= artifacts.mtime_ns
             """,
             (
@@ -242,11 +329,15 @@ class Database:
                 record.family_key,
                 record.base_build_id,
                 record.mtime_ns,
+                record.project_name,
+                record.batch_name,
+                1 if record.is_master else 0,
+                record.file_mask,
             ),
         )
 
     def upsert_source(self, record: SourceRecord) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO sources (build_id, source_path, file_path, content_hash, storage_kind, mtime_ns)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -268,7 +359,7 @@ class Database:
         )
 
     def get_family_latest(self, family_key: str) -> tuple[str, str] | None:
-        row = self._conn.execute(
+        row = self._execute(
             "SELECT latest_content_hash, latest_build_id FROM families WHERE family_key = ?",
             (family_key,),
         ).fetchone()
@@ -277,7 +368,7 @@ class Database:
         return row["latest_content_hash"], row["latest_build_id"]
 
     def set_family_latest(self, family_key: str, content_hash: str, build_id: str) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO families (family_key, latest_content_hash, latest_build_id)
             VALUES (?, ?, ?)
@@ -289,7 +380,7 @@ class Database:
         )
 
     def get_artifact(self, build_id: str, artifact_type: str) -> ArtifactRecord | None:
-        row = self._conn.execute(
+        row = self._execute(
             "SELECT * FROM artifacts WHERE build_id = ? AND type = ?",
             (build_id, artifact_type),
         ).fetchone()
@@ -311,10 +402,14 @@ class Database:
             original_size=original_size,
             stored_size=stored_size,
             base_build_id=row["base_build_id"] or "",
+            project_name=row["project_name"] if "project_name" in row.keys() else "",
+            batch_name=row["batch_name"] if "batch_name" in row.keys() else "",
+            is_master=bool(row["is_master"]) if "is_master" in row.keys() else False,
+            file_mask=row["file_mask"] if "file_mask" in row.keys() else "",
         )
 
     def get_source(self, build_id: str, source_path: str) -> SourceRecord | None:
-        row = self._conn.execute(
+        row = self._execute(
             "SELECT * FROM sources WHERE build_id = ? AND source_path = ?",
             (build_id, source_path),
         ).fetchone()
@@ -330,7 +425,7 @@ class Database:
         )
 
     def get_source_by_suffix(self, source_path: str) -> SourceRecord | None:
-        row = self._conn.execute(
+        row = self._execute(
             """
             SELECT * FROM sources
             WHERE source_path = ? OR source_path LIKE '%' || ?
@@ -351,7 +446,7 @@ class Database:
         )
 
     def increment_stat(self, key: str, delta: int = 1) -> None:
-        self._conn.execute(
+        self._execute(
             """
             INSERT INTO storage_stats (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = value + excluded.value
@@ -361,15 +456,15 @@ class Database:
 
     def count_stats(self) -> CountStats:
         """Aggregate DB counters for Web UI."""
-        artifacts_total = self._conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
-        artifacts_executable = self._conn.execute(
+        artifacts_total = self._execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        artifacts_executable = self._execute(
             "SELECT COUNT(*) FROM artifacts WHERE type = 'executable'"
         ).fetchone()[0]
-        artifacts_debuginfo = self._conn.execute(
+        artifacts_debuginfo = self._execute(
             "SELECT COUNT(*) FROM artifacts WHERE type = 'debuginfo'"
         ).fetchone()[0]
-        sources_total = self._conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
-        scanned_files_total = self._conn.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
+        sources_total = self._execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        scanned_files_total = self._execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
         return CountStats(
             artifacts_total=artifacts_total,
             artifacts_executable=artifacts_executable,
@@ -386,7 +481,7 @@ class Database:
             normalized = normalized[2:]
 
         if not normalized:
-            rows = self._conn.execute(
+            rows = self._execute(
                 """
                 SELECT build_id, type, file_path, build_id_kind, raw_build_id
                 FROM artifacts
@@ -397,7 +492,7 @@ class Database:
             ).fetchall()
         else:
             pattern = normalized + "%"
-            rows = self._conn.execute(
+            rows = self._execute(
                 """
                 SELECT build_id, type, file_path, build_id_kind, raw_build_id
                 FROM artifacts
@@ -443,10 +538,10 @@ class Database:
         return ui_results, complete, next_offset
 
     def get_stats(self) -> dict[str, Any]:
-        rows = self._conn.execute("SELECT key, value FROM storage_stats").fetchall()
+        rows = self._execute("SELECT key, value FROM storage_stats").fetchall()
         stats = {row["key"]: row["value"] for row in rows}
 
-        blob_rows = self._conn.execute(
+        blob_rows = self._execute(
             """
             SELECT storage_kind, COUNT(*) AS cnt,
                    SUM(original_size) AS orig,
@@ -462,8 +557,8 @@ class Database:
                 "stored_bytes": row["stored"] or 0,
             }
 
-        artifact_count = self._conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
-        source_count = self._conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        artifact_count = self._execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        source_count = self._execute("SELECT COUNT(*) FROM sources").fetchone()[0]
 
         total_original = sum(v["original_bytes"] for v in by_kind.values())
         total_stored = sum(v["stored_bytes"] for v in by_kind.values())
@@ -488,7 +583,7 @@ class Database:
         limit: int = 100,
     ) -> tuple[list[MetadataResult], bool, int]:
         """Search artifacts for /metadata endpoint."""
-        rows = self._conn.execute(
+        rows = self._execute(
             """
             SELECT a.*, b.original_size, b.stored_size
             FROM artifacts a
@@ -533,5 +628,129 @@ class Database:
         return page, complete, next_offset if not complete else 0
 
     def is_ready(self) -> bool:
-        row = self._conn.execute("SELECT COUNT(*) FROM scanned_files").fetchone()
+        row = self._execute("SELECT COUNT(*) FROM scanned_files").fetchone()
         return bool(row and row[0] > 0)
+
+    def upsert_project(self, name: str, dedup_enabled: bool = True, input_subpath: str = "") -> None:
+        self._execute(
+            """
+            INSERT INTO projects (name, dedup_enabled, input_subpath)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                dedup_enabled = excluded.dedup_enabled,
+                input_subpath = excluded.input_subpath
+            """,
+            (name, 1 if dedup_enabled else 0, input_subpath),
+        )
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        rows = self._execute(
+            """
+            SELECT p.name, p.dedup_enabled,
+                   COUNT(DISTINCT b.batch_name) AS batch_count,
+                   COUNT(a.build_id) AS artifact_count
+            FROM projects p
+            LEFT JOIN build_batches b ON b.project_name = p.name
+            LEFT JOIN artifacts a ON a.project_name = p.name
+            GROUP BY p.name, p.dedup_enabled
+            ORDER BY p.name
+            """
+        ).fetchall()
+        return [
+            {
+                "name": row["name"],
+                "dedup_enabled": bool(row["dedup_enabled"]),
+                "batch_count": row["batch_count"] or 0,
+                "artifact_count": row["artifact_count"] or 0,
+            }
+            for row in rows
+        ]
+
+    def list_batches(self, project_name: str) -> list[dict[str, Any]]:
+        rows = self._execute(
+            """
+            SELECT batch_name, directory, build_number, commit_tag_id, is_master, indexed_at
+            FROM build_batches
+            WHERE project_name = ?
+            ORDER BY build_number
+            """,
+            (project_name,),
+        ).fetchall()
+        return [
+            {
+                "batch_name": row["batch_name"],
+                "directory": row["directory"],
+                "build_number": row["build_number"],
+                "commit_tag_id": row["commit_tag_id"],
+                "is_master": bool(row["is_master"]),
+                "indexed_at": row["indexed_at"],
+            }
+            for row in rows
+        ]
+
+    def upsert_build_batch(
+        self,
+        project_name: str,
+        batch_name: str,
+        directory: str,
+        build_number: int,
+        commit_tag_id: str,
+        is_master: bool,
+        indexed_at: str,
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO build_batches (
+                project_name, batch_name, directory, build_number,
+                commit_tag_id, is_master, indexed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_name, batch_name) DO UPDATE SET
+                directory = excluded.directory,
+                build_number = excluded.build_number,
+                commit_tag_id = excluded.commit_tag_id,
+                is_master = excluded.is_master,
+                indexed_at = excluded.indexed_at
+            """,
+            (
+                project_name,
+                batch_name,
+                directory,
+                build_number,
+                commit_tag_id,
+                1 if is_master else 0,
+                indexed_at,
+            ),
+        )
+
+    def upsert_dedup_manifest(
+        self,
+        project_name: str,
+        batch_name: str,
+        file_mask: str,
+        master_build_number: int,
+        content_hash: str,
+        master_hash: str,
+        verify_ok: bool,
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO dedup_manifest (
+                project_name, batch_name, file_mask, master_build_number,
+                content_hash, master_hash, verify_ok
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_name, batch_name, file_mask) DO UPDATE SET
+                master_build_number = excluded.master_build_number,
+                content_hash = excluded.content_hash,
+                master_hash = excluded.master_hash,
+                verify_ok = excluded.verify_ok
+            """,
+            (
+                project_name,
+                batch_name,
+                file_mask,
+                master_build_number,
+                content_hash,
+                master_hash,
+                1 if verify_ok else 0,
+            ),
+        )

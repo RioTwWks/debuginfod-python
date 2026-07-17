@@ -141,6 +141,37 @@ class DeltaStore:
         self.db.increment_stat("bytes_saved", len(data) - len(patch_data))
         return record
 
+    def store_delta_patch(
+        self,
+        content_hash: str,
+        patch_data: bytes,
+        original_size: int,
+        base_hash: str,
+    ) -> BlobRecord:
+        """Store a pre-verified xdelta3 patch keyed by original content hash."""
+        existing = self.db.get_blob(content_hash)
+        if existing is not None:
+            return existing
+
+        path = self._blob_path("delta", content_hash)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(patch_data)
+
+        record = BlobRecord(
+            content_hash=content_hash,
+            storage_kind="delta",
+            stored_path=str(path),
+            original_size=original_size,
+            stored_size=len(patch_data),
+            base_hash=base_hash,
+        )
+        self.db.upsert_blob(record)
+        self.db.increment_stat("blobs_delta")
+        self.db.increment_stat("bytes_original", original_size)
+        self.db.increment_stat("bytes_stored", len(patch_data))
+        self.db.increment_stat("bytes_saved", original_size - len(patch_data))
+        return record
+
     def store_content(
         self,
         data: bytes,
