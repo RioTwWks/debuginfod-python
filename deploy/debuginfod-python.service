@@ -1,0 +1,18 @@
+[Unit]
+Description=debuginfod-python (Quik xdelta3 debuginfod server)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=debuginfod
+Group=debuginfod
+EnvironmentFile=-/etc/debuginfod/debuginfod.env
+WorkingDirectory=/var/lib/debuginfod
+ExecStart=/usr/bin/python3 -m debuginfod
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

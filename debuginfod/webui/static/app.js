@@ -283,7 +283,36 @@
     }, 350);
   });
 
+  async function loadProjects() {
+    const body = document.getElementById("projects-body");
+    if (!body) return;
+    try {
+      const res = await fetch("/ui/api/projects");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const projects = data.projects || [];
+      if (projects.length === 0) {
+        body.innerHTML = "<tr><td colspan='4'>Нет проектов — задайте DEBUGINFOD_DEDUP_PROJECTS</td></tr>";
+        return;
+      }
+      body.innerHTML = projects
+        .map(function (p) {
+          return (
+            "<tr><td>" + escapeHtml(p.name) + "</td>" +
+            "<td>" + (p.batch_count || 0) + "</td>" +
+            "<td>" + (p.artifact_count || 0) + "</td>" +
+            "<td>" + (p.dedup_enabled ? "да" : "нет") + "</td></tr>"
+          );
+        })
+        .join("");
+    } catch (_err) {
+      body.innerHTML = "<tr><td colspan='4'>Ошибка загрузки проектов</td></tr>";
+    }
+  }
+
   loadStats();
+  loadProjects();
   setInterval(loadStats, 30000);
+  setInterval(loadProjects, 60000);
   doSearch("", false);
 })();

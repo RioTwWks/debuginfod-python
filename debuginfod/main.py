@@ -10,10 +10,12 @@ import uvicorn
 
 from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.config import parse_args
+from debuginfod.database_factory import open_database
 from debuginfod.db import Database
 from debuginfod.delta_store import DeltaStore
 from debuginfod.indexer import Indexer
 from debuginfod.metrics import MetricsCollector
+from debuginfod.quik_indexer import QuikIndexer
 from debuginfod.scan_runner import ScanRunner
 from debuginfod.webapi import create_app
 
@@ -32,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting debuginfod-python on port %d", settings.port)
 
-    db = Database(settings.db_path)
+    db = open_database(settings)
     store = DeltaStore(
         db=db,
         blob_dir=settings.blob_dir,
@@ -42,8 +44,26 @@ def main(argv: list[str] | None = None) -> None:
     )
     store.verify_xdelta3()
 
+    scan_paths = list(settings.scan_paths)
+    if settings.dedup_enabled and settings.work_path not in scan_paths:
+        scan_paths.append(settings.work_path)
+
+    quik: QuikIndexer | None = None
+    if settings.dedup_enabled and settings.dedup_projects:
+        quik = QuikIndexer(
+            db=db,
+            store=store,
+            input_path=settings.input_path,
+            work_path=settings.work_path,
+            dedup_projects=list(settings.dedup_projects),
+            seven_zip_path=settings.seven_zip_path,
+            xdelta3_path=settings.xdelta3_path,
+            lzma_enabled=settings.delta_lzma,
+            remove_original_after_dedup=settings.remove_original_after_dedup,
+        )
+
     metrics = MetricsCollector()
-    indexer = Indexer(db=db, store=store, scan_paths=settings.scan_paths)
+    indexer = Indexer(db=db, store=store, scan_paths=scan_paths, quik_indexer=quik)
     scan_runner = ScanRunner(
         indexer=indexer,
         interval_sec=settings.rescan_interval_sec,

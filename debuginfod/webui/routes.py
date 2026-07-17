@@ -158,6 +158,17 @@ def register_webui(
         bench_store.save(payload)
         return {"report": payload}
 
+    @router.get("/ui/api/projects", include_in_schema=False)
+    async def ui_projects() -> dict[str, Any]:
+        return {"projects": db.list_projects()}
+
+    @router.get("/ui/api/projects/{project_name}/batches", include_in_schema=False)
+    async def ui_project_batches(project_name: str) -> dict[str, Any]:
+        return {
+            "project": project_name,
+            "batches": db.list_batches(project_name),
+        }
+
     @router.get("/ui/api/stats", include_in_schema=False)
     async def ui_stats() -> dict[str, Any]:
         counts = db.count_stats()
