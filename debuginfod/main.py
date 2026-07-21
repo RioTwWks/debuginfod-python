@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> None:
         objcopy_path=settings.objcopy_path,
         dedup_peak_factor=settings.memory_dedup_peak_factor,
         dedup_serial_above_mb=settings.memory_dedup_serial_above_mb,
+        dedup_max_file_mb=settings.memory_dedup_max_file_mb,
     )
     dedup_service: DedupService | None = None
     dedup_hook: DedupScanHook | None = None
@@ -90,13 +91,14 @@ def main(argv: list[str] | None = None) -> None:
         logger.info(
             "Memory limits: effective_max_rss=%d MiB max_swap=%d MiB (tree+delta) "
             "min_available=%d MiB dedup_peak=%.1fx decompress_peak=%.1fx "
-            "serial_above=%d MiB dwarf_max=%d MiB; swap baseline=%.1f MiB",
+            "serial_above=%d MiB dedup_max_file=%d MiB dwarf_max=%d MiB; swap baseline=%.1f MiB",
             eff_rss,
             settings.memory_max_swap_mb,
             settings.memory_min_available_mb,
             settings.memory_dedup_peak_factor,
             settings.memory_dedup_peak_factor_decompress,
             settings.memory_dedup_serial_above_mb,
+            settings.memory_dedup_max_file_mb,
             settings.scan_dwarf_max_mb,
             memory_governor.baseline_system_swap_bytes / (1024 * 1024),
         )

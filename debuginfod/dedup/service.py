@@ -29,6 +29,7 @@ class DedupConfig:
     objcopy_path: str = "objcopy"
     dedup_peak_factor: float = 3.0
     dedup_serial_above_mb: int = 64
+    dedup_max_file_mb: int = 256
 
 
 class DedupService:
@@ -77,6 +78,7 @@ class DedupService:
             dedup_strategy=self.cfg.strategy,
             dedup_peak_factor=peak_factor,
             dedup_serial_above_mb=self.cfg.dedup_serial_above_mb,
+            dedup_max_file_mb=self.cfg.dedup_max_file_mb,
         )
 
     def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str:

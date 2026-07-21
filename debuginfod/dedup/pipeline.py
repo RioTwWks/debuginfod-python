@@ -22,6 +22,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _uses_decompress(strategy: str) -> bool:
+    return "decompress" in strategy.lower()
+
+
+def _dedup_peak_bytes(path: str | Path, opts: PipelineOptions) -> int:
+    from debuginfod.memlimit import estimate_decompress_peak_bytes, estimate_dedup_peak_bytes
+
+    size = Path(path).stat().st_size
+    if _uses_decompress(opts.dedup_strategy):
+        limits = opts.memory_governor.limits if opts.memory_governor is not None else None
+        return estimate_decompress_peak_bytes(size, limits)
+    return estimate_dedup_peak_bytes(size, opts.dedup_peak_factor)
+
+
+def _group_peak_bytes(group: list, opts: PipelineOptions) -> int:
+    peaks: list[int] = []
+    for record in group:
+        path = Path(record.file_path)
+        if path.is_file():
+            peaks.append(_dedup_peak_bytes(path, opts))
+    return max(peaks) if peaks else 0
+
+
+def _file_exceeds_dedup_max(record: DedupFileRecord, opts: PipelineOptions) -> bool:
+        return False
+    limit = opts.dedup_max_file_mb * 1024 * 1024
+    size = int(record.original_size or 0)
+    if size <= 0:
+        try:
+            size = Path(record.file_path).stat().st_size
+        except OSError:
+            return False
+    return size > limit
+
+
 @dataclass
 class PipelineOptions:
     db: Database
@@ -38,6 +73,7 @@ class PipelineOptions:
     dedup_strategy: str = ""
     dedup_peak_factor: float = 3.0
     dedup_serial_above_mb: int = 64
+    dedup_max_file_mb: int = 256
 
 
 @dataclass
@@ -127,18 +163,21 @@ def process_group(
     stop_event: object | None = None,
 ) -> tuple[int, int, int, Exception | None]:
     gov = memory_governor or opts.memory_governor
-    peak_factor = opts.dedup_peak_factor
     bytes_before = sum(f.original_size for f in group)
     base = group[0]
+    if _file_exceeds_dedup_max(base, opts):
+        msg = f"file exceeds DEBUGINFOD_DEDUP_MAX_FILE_MB={opts.dedup_max_file_mb}"
+        opts.db.mark_dedup_file_error(base.id, msg)
+        return 0, bytes_before, 0, RuntimeError(msg)
     if not Path(base.file_path).is_file():
         opts.db.mark_dedup_file_error(base.id, f"base missing: {base.file_path}")
         return 0, bytes_before, 0, FileNotFoundError(base.file_path)
 
     base_size = int(base.original_size or Path(base.file_path).stat().st_size)
-    if gov is not None and not gov.wait_for_job(
-        base_size, stop_event, peak_factor=peak_factor
-    ):
-        return 0, bytes_before, 0, RuntimeError("dedup stopped (memory pressure)")
+    peak_bytes = _dedup_peak_bytes(base.file_path, opts)
+    if gov is not None:
+        if not gov.wait_for_peak_bytes(peak_bytes, stop_event):
+            return 0, bytes_before, 0, RuntimeError("dedup stopped (memory pressure)")
 
     try:
         opts.preprocessor.apply_in_place(
@@ -150,6 +189,9 @@ def process_group(
         opts.db.mark_dedup_file_error(base.id, str(exc))
         return 0, bytes_before, 0, exc
 
+    from debuginfod.memlimit import release_heap
+
+    release_heap()
     base_sha = file_sha256(base.file_path)
     base_size = Path(base.file_path).stat().st_size
     opts.db.mark_dedup_file_done(base.id, "base", None, "", base_sha, base_size)
@@ -161,6 +203,11 @@ def process_group(
         if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
             group_err = RuntimeError("dedup stopped")
             break
+        if _file_exceeds_dedup_max(target, opts):
+            msg = f"file exceeds DEBUGINFOD_DEDUP_MAX_FILE_MB={opts.dedup_max_file_mb}"
+            opts.db.mark_dedup_file_error(target.id, msg)
+            group_err = RuntimeError(msg)
+            continue
         try:
             delta_size = compress_one(
                 opts,
@@ -171,14 +218,15 @@ def process_group(
             )
             compressed += 1
             bytes_after += delta_size
+            release_heap()
         except Exception as exc:
             logger.warning("dedup compress failed for %s: %s", target.file_path, exc)
             opts.db.mark_dedup_file_error(target.id, str(exc))
             group_err = exc
 
     if opts.compress_base and opts.objcopy_zstd.available():
-        if gov is not None and not gov.wait_for_job(
-            base_size, stop_event, peak_factor=peak_factor
+        if gov is not None and not gov.wait_for_peak_bytes(
+            _dedup_peak_bytes(base.file_path, opts), stop_event
         ):
             group_err = RuntimeError("dedup stopped (memory pressure)")
         else:
@@ -190,6 +238,7 @@ def process_group(
                 )
                 opts.db.update_dedup_file_compressed_size(base.id, comp_size)
                 bytes_after = bytes_after - base_size + comp_size
+                release_heap()
             except Exception as exc:
                 opts.db.mark_dedup_file_error(base.id, f"compress base: {exc}")
                 group_err = exc
@@ -206,14 +255,15 @@ def compress_one(
     stop_event: object | None = None,
 ) -> int:
     gov = memory_governor or opts.memory_governor
-    peak_factor = opts.dedup_peak_factor
     if not Path(target.file_path).is_file():
         raise FileNotFoundError(target.file_path)
+    if _file_exceeds_dedup_max(target, opts):
+        raise RuntimeError(f"file exceeds DEBUGINFOD_DEDUP_MAX_FILE_MB={opts.dedup_max_file_mb}")
 
-    target_size = int(target.original_size or Path(target.file_path).stat().st_size)
-    if gov is not None and not gov.wait_for_job(
-        target_size, stop_event, peak_factor=peak_factor
-    ):
+    from debuginfod.memlimit import estimate_xdelta_peak_bytes, release_heap
+
+    peak_bytes = _dedup_peak_bytes(target.file_path, opts)
+    if gov is not None and not gov.wait_for_peak_bytes(peak_bytes, stop_event):
         raise RuntimeError("dedup stopped (memory pressure)")
 
     work_dir = Path(tempfile.mkdtemp(prefix="dedup-prep-", dir=str(Path(target.file_path).parent)))
@@ -225,13 +275,33 @@ def compress_one(
             memory_governor=gov,
             stop_event=stop_event,
         )
+        release_heap()
         orig_sha = file_sha256(prep_target)
 
+        base_bytes = Path(base.file_path).stat().st_size
+        prep_bytes = prep_target.stat().st_size
+        xdelta_peak = estimate_xdelta_peak_bytes(base_bytes, prep_bytes)
+        if gov is not None and not gov.wait_for_peak_bytes(xdelta_peak, stop_event):
+            raise RuntimeError("dedup stopped before xdelta (memory pressure)")
+
         delta_path = delta_path_for(target.file_path)
-        opts.xdelta.encode(base.file_path, prep_target, delta_path)
+        opts.xdelta.encode(
+            base.file_path,
+            prep_target,
+            delta_path,
+            memory_governor=gov,
+            stop_event=stop_event,
+        )
 
         tmp_restore = work_dir / "restore-verify.debug"
-        opts.xdelta.decode(base.file_path, delta_path, tmp_restore)
+        opts.xdelta.decode(
+            base.file_path,
+            delta_path,
+            tmp_restore,
+            memory_governor=gov,
+            stop_event=stop_event,
+        )
+        release_heap()
         restored_sha = file_sha256(tmp_restore)
         if restored_sha != orig_sha:
             Path(delta_path).unlink(missing_ok=True)
