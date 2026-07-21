@@ -1,24 +1,23 @@
 # debuginfod-python
 
-Альтернативная реализация [debuginfod](https://sourceware.org/elfutils/Debuginfod.html) на **Python** с хранением артефактов через **xdelta3** (diff/patch). Предназначена для сравнения с [debuginfod-go](https://github.com/RioTwWks/debuginfod-go), где файлы индексируются и отдаются «как есть» с диска.
+Реализация [debuginfod](https://sourceware.org/elfutils/Debuginfod.html) на **Python** с той же архитектурой, что и [debuginfod-go](https://github.com/RioTwWks/debuginfod-go): **индекс метаданных в БД + файлы на диске**, отдельная подсистема **Quik dedup** (xdelta3) после сканирования.
 
-## Идея сравнения
+## Архитектура (как в debuginfod-go)
 
-| Аспект | debuginfod-go | debuginfod-python |
-|--------|---------------|-------------------|
-| Язык | Go | Python |
-| Хранение | Индекс в SQLite + оригинальные файлы на диске | Content-addressed blobs + xdelta3-дельты |
-| Дедупликация | Нет (только кеш извлечения из архивов) | Да, через SHA-256 и патчи между версиями |
-| Отдача клиенту | Прямой `ServeFile` / stream из архива | Реконструкция из full/delta chain + кеш |
-| Порт по умолчанию | 8002 | 8003 |
-
-При повторных сборках одного и того же бинарника (та же «семья» пути) сервер пытается сохранить **xdelta3-патч** относительно предыдущей версии. Если патч не меньше порога (`DEBUGINFOD_DELTA_MIN_RATIO`, по умолчанию 85% от оригинала), сохраняется полный blob.
+| Аспект | Поведение |
+|--------|-----------|
+| Индексация | Инкрементальный scan `scanned_files`, ELF с build-id → `artifacts` |
+| Без build-id | Qt `.debug` без GNU build-id пропускаются (`no_build_id`), обрабатываются dedup |
+| Хранение | Файлы остаются на исходных путях; БД хранит только метаданные |
+| Dedup | После scan: discover `build_*` → xdelta3 → `.debug.xdelta` рядом с оригиналом |
+| Отдача | `FileResponse` с диска; для delta — `restore_to_cache()` в `{cache}/dedup-restored/` |
+| Порт по умолчанию | 8003 (Go — 8002) |
 
 ## Требования
 
 - Python 3.11+
-- **xdelta3** (`apt install xdelta3` / `dnf install xdelta3`)
-- gcc (для генерации тестовых артефактов)
+- **xdelta3**, **dwz**, **objcopy** (для dedup)
+- gcc (для тестов)
 
 ## Установка
 
@@ -34,17 +33,16 @@ pip install -e ".[dev]"
 
 ```bash
 cp .env.example .env
-# Укажите каталоги с debuginfo/ELF, например:
-# DEBUGINFOD_SCAN_PATH=/usr/lib/debug,/path/to/build/outputs
+# DEBUGINFOD_SCAN_PATH=/path/to/build/outputs
+# DEBUGINFOD_DEDUP_ENABLED=true
+# DEBUGINFOD_DEDUP_PROJECTS=QuikServer,Front
 
 python -m debuginfod
-# или
-debuginfod -s /usr/lib/debug -p 8003
 ```
 
-## HTTP API (совместимость с debuginfod)
+## HTTP API
 
-Стандартные эндпоинты:
+Стандартные эндпоинты debuginfod:
 
 - `GET /buildid/{BUILDID}/debuginfo`
 - `GET /buildid/{BUILDID}/executable`
@@ -53,204 +51,45 @@ debuginfod -s /usr/lib/debug -p 8003
 - `GET /metadata?key=glob|file|buildid&value=...`
 - `GET /healthz`, `GET /readyz`
 - `POST /admin/rescan` (опционально `X-Admin-Token`)
+- `POST /admin/dedup-backfill` — ручной запуск dedup
 
-Дополнительно для бенчмарка:
+Дополнительно:
 
-- `GET /stats` — статистика хранения (full vs delta, сэкономленные байты, compression ratio)
+- `GET /stats` — статистика индекса и dedup
+
+## Dedup (Quik)
+
+Включение:
+
+```bash
+DEBUGINFOD_DEDUP_ENABLED=true
+DEBUGINFOD_DEDUP_PROJECTS=QuikServer,Front
+DEBUGINFOD_DEDUP_WORKERS=4
+DEBUGINFOD_DEDUP_STRATEGY=xdelta-decompress-dwz
+DEBUGINFOD_XDELTA_PATH=xdelta3
+DEBUGINFOD_DWZ_PATH=dwz
+DEBUGINFOD_OBJCOPY_PATH=objcopy
+```
+
+Пайплайн (как в Go):
+
+1. Discover каталогов `build_*` под `DEBUGINFOD_SCAN_PATH`
+2. Группировка по `normalize_project + file_stem`, base = min `file_build_num`
+3. `objcopy --decompress-debug-sections` + `dwz` → xdelta3 → verify → удаление оригинала
+4. Дельты: `<file>.debug.xdelta` рядом с base
 
 ## Web UI
 
-Дашборд по аналогии с [debuginfod-go](https://github.com/RioTwWks/debuginfod-go): **http://localhost:8003/ui/**
+**http://localhost:8003/ui/** — дашборд, поиск, проекты dedup.
 
-- Статистика индекса (артефакты, сканирование, HTTP-запросы)
-- Метрики xdelta3-хранилища (сэкономленные байты, коэффициент сжатия)
-- Поиск артефактов: build-id (префикс), glob, file
-- Ссылки на скачивание debuginfo/executable
-
-API дашборда:
-
-- `GET /ui/api/stats`
-- `GET /ui/api/search?key=buildid|glob|file&...`
-
-Отключить UI: `DEBUGINFOD_UI_ENABLED=false` или флаг `--no-ui`.
-
-### Benchmark UI
-
-**http://localhost:8003/ui/benchmark/** — визуализация сравнения Go vs Python:
-
-- форма запуска бенчмарка (URL обоих серверов, testdata, число прогонов)
-- графики латентности по версиям бинарника (canvas)
-- сравнение дискового пространства (Go testdata vs Python blobs)
-- таблица деталей и история запусков
-
-API:
-
-- `GET /ui/api/benchmark/config` — параметры по умолчанию
-- `POST /ui/api/benchmark/run` — запуск сравнения
-- `GET /ui/api/benchmark/last` — последний отчёт
-- `GET /ui/api/benchmark/history` — история (до 20 записей)
-
-Пример для GDB/LLDB:
-
-```bash
-export DEBUGINFOD_URLS="http://localhost:8003"
-debuginfod-find executable <BUILDID>
-```
-
-## Сравнительный бенчмарк
-
-### 1. Поднять оба сервиса
-
-**Go** (порт 8002):
-
-```bash
-cd /path/to/debuginfod-go
-DEBUGINFOD_PORT=8002 DEBUGINFOD_SCAN_PATH=./testdata/versions ./debuginfod
-```
-
-**Python** (порт 8003):
-
-```bash
-DEBUGINFOD_PORT=8003 DEBUGINFOD_SCAN_PATH=./testdata/versions python -m debuginfod
-```
-
-### 2. Сгенерировать тестовые версии бинарника
-
-```bash
-python scripts/generate_test_artifacts.py -o testdata/versions -n 10
-```
-
-Скрипт собирает `demo_v1` … `demo_vN` с флагом `-Wl,--build-id=sha1` (обязательно для бенчмарка).
-
-Если бинарники уже есть, но без build-id — пересоберите их этой командой.
-
-### 3. Запустить сравнение
-
-Бенчмарк автоматически вызывает `POST /admin/rescan` на обоих серверах перед тестом.
-
-```bash
-python scripts/compare_benchmark.py \
-  --go-url http://localhost:8002 \
-  --py-url http://localhost:8003 \
-  --testdata testdata/versions \
-  --go-admin-key "$DEBUGINFOD_ADMIN_KEY"
-```
-
-Если у debuginfod-go включён `DEBUGINFOD_ADMIN_KEY`, передайте тот же ключ через `--go-admin-key` или переменную `DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY`. Без ключа rescan Go вернёт **401**, и латентность Go в UI может показывать `err` (разные build-id на серверах).
-
-Убедитесь, что **оба** сервера запущены с `DEBUGINFOD_SCAN_PATH=testdata/versions` (или абсолютным путём к нему). Иначе Python проиндексирует `/usr/lib/debug` и другие пути — в дашборде будет «303 файла», а метрики хранения не сравнимы с Go.
-
-Скрипт выводит JSON с:
-
-- латентностью загрузки executable для каждой версии (Go vs Python);
-- метриками хранения **только по testdata** (не глобальный `/stats` Python-сервера);
-- `warnings` — подсказки (401 rescan, лишние scan paths, расхождение build-id).
-
-### Метрики для презентации коллегам
-
-1. **Диск**: суммарный размер ELF в testdata (Go) vs оценка blob-хранилища Python для тех же файлов.
-2. **Сжатие**: `compression_ratio` по testdata и `storage_kind` (delta/full) в `/metadata`.
-3. **Латентность**: среднее время `GET /buildid/.../executable` (у Python есть overhead реконструкции xdelta3).
-4. **CPU/RAM**: наблюдение через `htop` при массовых запросах.
-
-## Конфигурация
-
-| Переменная | По умолчанию | Описание |
-|------------|--------------|----------|
-| `DEBUGINFOD_DB_PATH` | `debuginfod.sqlite` | SQLite с метаданными |
-| `DEBUGINFOD_SCAN_PATH` | `.` | Каталоги для сканирования (через запятую) |
-| `DEBUGINFOD_PORT` | `8003` | HTTP-порт |
-| `DEBUGINFOD_BLOB_DIR` | `.debuginfod-blobs` | Full blobs и deltas |
-| `DEBUGINFOD_RECONSTRUCT_CACHE_DIR` | `.debuginfod-reconstruct-cache` | Кеш реконструированных файлов |
-| `DEBUGINFOD_DELTA_MIN_RATIO` | `0.85` | Порог: delta сохраняется, если patch < ratio × original |
-| `DEBUGINFOD_XDELTA3_PATH` | `xdelta3` | Путь к бинарнику xdelta3 |
-| `DEBUGINFOD_RESCAN_INTERVAL` | `3600` | Интервал фонового rescan (сек) |
-| `DEBUGINFOD_UI_ENABLED` | `true` | Web UI на `/ui/` |
-| `DEBUGINFOD_BENCHMARK_GO_URL` | `http://localhost:8002` | URL debuginfod-go для бенчмарка |
-| `DEBUGINFOD_BENCHMARK_TESTDATA` | `testdata/versions` | Каталог с demo_v* для бенчмарка |
-| `DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY` | — | X-Admin-Token для rescan Go при бенчмарке |
-| `DEBUGINFOD_BENCHMARK_PY_ADMIN_KEY` | `DEBUGINFOD_ADMIN_KEY` | X-Admin-Token для rescan Python |
-| `DEBUGINFOD_INPUT_PATH` | `incoming` | Входная директория Quik-сборок |
-| `DEBUGINFOD_WORK_PATH` | `store` | Рабочее хранилище после индексации |
-| `DEBUGINFOD_DEDUP_PROJECTS` | — | Проекты с дедупликацией (через запятую) |
-| `DEBUGINFOD_DEDUP_ENABLED` | `false` | Включить Quik pipeline при scan |
-| `DEBUGINFOD_DATABASE_URL` | — | PostgreSQL URL (prod); без URL — SQLite |
-| `DEBUGINFOD_SEVEN_ZIP_PATH` | `7z` | Путь к 7z для `*.7zip.debug` |
-| `DEBUGINFOD_DELTA_LZMA` | `false` | LZMA поверх xdelta3 patch |
-
-## Quik deduplication (DEVOPS-110)
-
-Алгоритм из `filediffs.ps1`, встроенный в индексацию:
-
-1. Распаковка `*.7zip.debug` (7z)
-2. Группировка сборок `build_N_*` по commit tag из ELF `.comment`
-3. Master = минимальный номер сборки в группе
-4. xdelta3 delta для остальных + **обязательная** round-trip проверка
-5. Отдача через debuginfod HTTP с реконструкцией на лету
-
-```bash
-DEBUGINFOD_INPUT_PATH=/data/incoming \
-DEBUGINFOD_WORK_PATH=/var/lib/debuginfod/store \
-DEBUGINFOD_DEDUP_PROJECTS=QuikServer,Front \
-DEBUGINFOD_DEDUP_ENABLED=true \
-DEBUGINFOD_SCAN_PATH=/var/lib/debuginfod/store \
-python -m debuginfod
-```
-
-Структура входной директории:
-
-```text
-incoming/
-  QuikServer/
-    build_1_2025-02_27_11_24_37/
-    build_65_2025-03_03_19_32_08/
-  Front/
-    build_2_...
-```
-
-Отчёт сравнения с Go:
-
-```bash
-python scripts/quik_storage_report.py --testdata incoming/QuikServer --python-blob-dir .debuginfod-blobs
-```
-
-### Production (systemd)
-
-См. `deploy/debuginfod-python.service` и `deploy/debuginfod.env.example`.
-
-```bash
-sudo cp deploy/debuginfod.env.example /etc/debuginfod/debuginfod.env
-sudo cp deploy/debuginfod-python.service /etc/systemd/system/
-sudo systemctl enable --now debuginfod-python
-```
-
-Зависимости: `deploy/install-deps-astra.sh` или `deploy/install-deps-redos.sh`.
-
-PostgreSQL: `pip install -e '.[postgres]'`, задайте `DEBUGINFOD_DATABASE_URL`.
+**http://localhost:8003/ui/benchmark/** — сравнение Go vs Python.
 
 ## Тесты
 
 ```bash
-pytest -q
+pytest
 ```
 
-## Архитектура
+## Сравнение с debuginfod-go
 
-```
-Сканирование ELF → build-id + family_key
-       ↓
-Первая версия семьи → full blob (SHA-256)
-Следующие версии   → xdelta3 -e -s base new patch
-       ↓
-SQLite: artifacts(build_id, type) → content_hash → blobs(full|delta)
-       ↓
-HTTP GET → reconstruct (цепочка delta) → stream клиенту
-```
-
-## Ограничения v1
-
-- Сканируются loose ELF и исходники из DWARF (без .deb/.rpm — в Go-версии они есть).
-- Цепочки delta: каждая версия патчится от предыдущей; глубокая цепочка увеличивает стоимость реконструкции.
-- Federation/upstream proxy не реализован.
-
-Эти ограничения не мешают A/B-тесту «индекс на диске» vs «xdelta3-хранилище» на одном наборе ELF.
+Оба сервера используют одинаковую модель: метаданные в SQLite/PostgreSQL, файлы на диске, dedup как post-scan hook. Для честного бенчмарка укажите одинаковый `DEBUGINFOD_SCAN_PATH`.

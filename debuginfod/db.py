@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, Literal
 
+from debuginfod.db_dedup import DedupDbMixin, DedupFileRecord, DedupProjectTotals
+
 StorageKind = Literal["full", "delta"]
 
 
@@ -27,30 +29,31 @@ class BlobRecord:
 class ArtifactRecord:
     build_id: str
     artifact_type: str
-    file_path: str
-    content_hash: str
-    storage_kind: StorageKind
+    file_path: str = ""
+    archive_path: str = ""
+    member_path: str = ""
     build_id_kind: str = "gnu"
     raw_build_id: str = ""
-    family_key: str = ""
     mtime_ns: int = 0
+    # legacy blob fields (optional)
+    content_hash: str = ""
+    storage_kind: str = ""
+    family_key: str = ""
+    base_build_id: str = ""
     original_size: int = 0
     stored_size: int = 0
-    base_build_id: str = ""
-    project_name: str = ""
-    batch_name: str = ""
-    is_master: bool = False
-    file_mask: str = ""
 
 
 @dataclass(frozen=True)
 class SourceRecord:
     build_id: str
     source_path: str
-    file_path: str
-    content_hash: str
-    storage_kind: StorageKind
+    file_path: str = ""
+    archive_path: str = ""
+    member_path: str = ""
     mtime_ns: int = 0
+    content_hash: str = ""
+    storage_kind: str = "full"
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ class MetadataResult:
     compression_ratio: float = 1.0
 
 
-class Database:
+class Database(DedupDbMixin):
     """SQLite or PostgreSQL metadata store."""
 
     def __init__(self, db_path: Path, database_url: str = "") -> None:
@@ -196,6 +199,7 @@ class Database:
             """
         )
         self._ensure_artifact_columns()
+        self._migrate_dedup()
         self._conn.commit()
 
     def _migrate_postgres(self) -> None:
@@ -205,6 +209,7 @@ class Database:
             sql = statement.strip()
             if sql:
                 self._conn.execute(sql)
+        self._migrate_dedup()
         self._conn.commit()
 
     def _ensure_artifact_columns(self) -> None:
@@ -214,10 +219,12 @@ class Database:
         rows = self._execute("PRAGMA table_info(artifacts)").fetchall()
         existing = {row[1] for row in rows}
         additions = {
-            "project_name": "TEXT NOT NULL DEFAULT ''",
-            "batch_name": "TEXT NOT NULL DEFAULT ''",
-            "is_master": "INTEGER NOT NULL DEFAULT 0",
-            "file_mask": "TEXT NOT NULL DEFAULT ''",
+            "archive_path": "TEXT NOT NULL DEFAULT ''",
+            "member_path": "TEXT NOT NULL DEFAULT ''",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+            "storage_kind": "TEXT NOT NULL DEFAULT ''",
+            "family_key": "TEXT NOT NULL DEFAULT ''",
+            "base_build_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, typedef in additions.items():
             if column not in existing:
@@ -299,62 +306,64 @@ class Database:
         self._execute(
             """
             INSERT INTO artifacts (
-                build_id, type, file_path, content_hash, storage_kind,
-                build_id_kind, raw_build_id, family_key, base_build_id, mtime_ns,
-                project_name, batch_name, is_master, file_mask
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                build_id, type, file_path, archive_path, member_path,
+                build_id_kind, raw_build_id, mtime_ns,
+                content_hash, storage_kind, family_key, base_build_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(build_id, type) DO UPDATE SET
                 file_path = excluded.file_path,
-                content_hash = excluded.content_hash,
-                storage_kind = excluded.storage_kind,
+                archive_path = excluded.archive_path,
+                member_path = excluded.member_path,
                 build_id_kind = excluded.build_id_kind,
                 raw_build_id = excluded.raw_build_id,
-                family_key = excluded.family_key,
-                base_build_id = excluded.base_build_id,
                 mtime_ns = excluded.mtime_ns,
-                project_name = excluded.project_name,
-                batch_name = excluded.batch_name,
-                is_master = excluded.is_master,
-                file_mask = excluded.file_mask
+                content_hash = excluded.content_hash,
+                storage_kind = excluded.storage_kind,
+                family_key = excluded.family_key,
+                base_build_id = excluded.base_build_id
             WHERE excluded.mtime_ns >= artifacts.mtime_ns
             """,
             (
                 record.build_id,
                 record.artifact_type,
                 record.file_path,
-                record.content_hash,
-                record.storage_kind,
+                record.archive_path,
+                record.member_path,
                 record.build_id_kind,
                 record.raw_build_id,
+                record.mtime_ns,
+                record.content_hash,
+                record.storage_kind,
                 record.family_key,
                 record.base_build_id,
-                record.mtime_ns,
-                record.project_name,
-                record.batch_name,
-                1 if record.is_master else 0,
-                record.file_mask,
             ),
         )
 
     def upsert_source(self, record: SourceRecord) -> None:
         self._execute(
             """
-            INSERT INTO sources (build_id, source_path, file_path, content_hash, storage_kind, mtime_ns)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sources (
+                build_id, source_path, file_path, archive_path, member_path, mtime_ns,
+                content_hash, storage_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(build_id, source_path) DO UPDATE SET
                 file_path = excluded.file_path,
+                archive_path = excluded.archive_path,
+                member_path = excluded.member_path,
+                mtime_ns = excluded.mtime_ns,
                 content_hash = excluded.content_hash,
-                storage_kind = excluded.storage_kind,
-                mtime_ns = excluded.mtime_ns
+                storage_kind = excluded.storage_kind
             WHERE excluded.mtime_ns >= sources.mtime_ns
             """,
             (
                 record.build_id,
                 record.source_path,
                 record.file_path,
+                record.archive_path,
+                record.member_path,
+                record.mtime_ns,
                 record.content_hash,
                 record.storage_kind,
-                record.mtime_ns,
             ),
         )
 
@@ -386,26 +395,20 @@ class Database:
         ).fetchone()
         if row is None:
             return None
-        blob = self.get_blob(row["content_hash"])
-        original_size = blob.original_size if blob else 0
-        stored_size = blob.stored_size if blob else 0
+        keys = row.keys() if hasattr(row, "keys") else row
         return ArtifactRecord(
             build_id=row["build_id"],
             artifact_type=row["type"],
-            file_path=row["file_path"],
-            content_hash=row["content_hash"],
-            storage_kind=row["storage_kind"],
+            file_path=row["file_path"] or "",
+            archive_path=row["archive_path"] if "archive_path" in keys else "",
+            member_path=row["member_path"] if "member_path" in keys else "",
             build_id_kind=row["build_id_kind"],
             raw_build_id=row["raw_build_id"],
-            family_key=row["family_key"],
             mtime_ns=row["mtime_ns"],
-            original_size=original_size,
-            stored_size=stored_size,
-            base_build_id=row["base_build_id"] or "",
-            project_name=row["project_name"] if "project_name" in row.keys() else "",
-            batch_name=row["batch_name"] if "batch_name" in row.keys() else "",
-            is_master=bool(row["is_master"]) if "is_master" in row.keys() else False,
-            file_mask=row["file_mask"] if "file_mask" in row.keys() else "",
+            content_hash=row["content_hash"] if "content_hash" in keys else "",
+            storage_kind=row["storage_kind"] if "storage_kind" in keys else "",
+            family_key=row["family_key"] if "family_key" in keys else "",
+            base_build_id=row["base_build_id"] if "base_build_id" in keys else "",
         )
 
     def get_source(self, build_id: str, source_path: str) -> SourceRecord | None:
@@ -538,41 +541,40 @@ class Database:
         return ui_results, complete, next_offset
 
     def get_stats(self) -> dict[str, Any]:
-        rows = self._execute("SELECT key, value FROM storage_stats").fetchall()
-        stats = {row["key"]: row["value"] for row in rows}
-
-        blob_rows = self._execute(
-            """
-            SELECT storage_kind, COUNT(*) AS cnt,
-                   SUM(original_size) AS orig,
-                   SUM(stored_size) AS stored
-            FROM blobs GROUP BY storage_kind
-            """
-        ).fetchall()
-        by_kind: dict[str, dict[str, int]] = {}
-        for row in blob_rows:
-            by_kind[row["storage_kind"]] = {
-                "count": row["cnt"],
-                "original_bytes": row["orig"] or 0,
-                "stored_bytes": row["stored"] or 0,
-            }
-
         artifact_count = self._execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
         source_count = self._execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+        scanned_count = self._execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
 
-        total_original = sum(v["original_bytes"] for v in by_kind.values())
-        total_stored = sum(v["stored_bytes"] for v in by_kind.values())
-        savings = total_original - total_stored
+        bytes_on_disk = 0
+        rows = self._execute(
+            "SELECT DISTINCT file_path FROM artifacts WHERE file_path != ''"
+        ).fetchall()
+        seen: set[str] = set()
+        for row in rows:
+            path = row["file_path"] if isinstance(row, dict) else row[0]
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                bytes_on_disk += Path(path).stat().st_size
+            except OSError:
+                continue
+
+        dedup = self.dedup_stats()
+        bytes_before = int(dedup.get("bytes_before", 0))
+        bytes_after = int(dedup.get("bytes_after", 0))
+        bytes_saved = int(dedup.get("bytes_saved", 0))
 
         return {
-            "counters": stats,
-            "blobs": by_kind,
             "artifact_count": artifact_count,
             "source_count": source_count,
-            "total_original_bytes": total_original,
-            "total_stored_bytes": total_stored,
-            "bytes_saved": savings,
-            "compression_ratio": (total_stored / total_original) if total_original else 1.0,
+            "scanned_files_total": scanned_count,
+            "bytes_on_disk": bytes_on_disk,
+            "dedup": dedup,
+            "bytes_before": bytes_before,
+            "bytes_after": bytes_after,
+            "bytes_saved": bytes_saved,
+            "compression_ratio": (bytes_after / bytes_before) if bytes_before else 1.0,
         }
 
     def search_metadata(
@@ -585,17 +587,16 @@ class Database:
         """Search artifacts for /metadata endpoint."""
         rows = self._execute(
             """
-            SELECT a.*, b.original_size, b.stored_size
-            FROM artifacts a
-            JOIN blobs b ON a.content_hash = b.content_hash
-            ORDER BY a.build_id, a.type
+            SELECT build_id, type, file_path, archive_path, build_id_kind, raw_build_id
+            FROM artifacts
+            ORDER BY build_id, type
             """
         ).fetchall()
 
         matches: list[MetadataResult] = []
         for row in rows:
-            file_path = row["file_path"]
-            archive = ""
+            file_path = row["file_path"] or ""
+            archive = row["archive_path"] if "archive_path" in row.keys() else ""
             if key == "file" and file_path != value:
                 continue
             if key == "glob" and not fnmatch.fnmatch(file_path, value):
@@ -606,19 +607,14 @@ class Database:
                 if not match_build_id_query(value, row["build_id"], row["raw_build_id"] or ""):
                     continue
 
-            orig = row["original_size"] or 1
-            stored = row["stored_size"] or orig
             matches.append(
                 MetadataResult(
                     buildid=row["build_id"],
                     type=row["type"],
                     file=file_path,
-                    archive=archive,
+                    archive=archive or "",
                     buildid_kind=row["build_id_kind"] or "",
                     raw_buildid=row["raw_build_id"] or "",
-                    storage_kind=row["storage_kind"],
-                    content_hash=row["content_hash"],
-                    compression_ratio=stored / orig,
                 )
             )
 
@@ -644,26 +640,17 @@ class Database:
         )
 
     def list_projects(self) -> list[dict[str, Any]]:
-        rows = self._execute(
-            """
-            SELECT p.name, p.dedup_enabled,
-                   COUNT(DISTINCT b.batch_name) AS batch_count,
-                   COUNT(a.build_id) AS artifact_count
-            FROM projects p
-            LEFT JOIN build_batches b ON b.project_name = p.name
-            LEFT JOIN artifacts a ON a.project_name = p.name
-            GROUP BY p.name, p.dedup_enabled
-            ORDER BY p.name
-            """
-        ).fetchall()
         return [
             {
-                "name": row["name"],
-                "dedup_enabled": bool(row["dedup_enabled"]),
-                "batch_count": row["batch_count"] or 0,
-                "artifact_count": row["artifact_count"] or 0,
+                "name": p.name,
+                "dedup_enabled": True,
+                "batch_count": 0,
+                "artifact_count": p.file_count,
+                "bytes_before": p.bytes_before,
+                "bytes_after": p.bytes_after,
+                "bytes_saved": max(0, p.bytes_before - p.bytes_after),
             }
-            for row in rows
+            for p in self.list_dedup_projects()
         ]
 
     def list_batches(self, project_name: str) -> list[dict[str, Any]]:

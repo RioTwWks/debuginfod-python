@@ -6,16 +6,15 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.requests import Request as StarletteRequest
 
 from debuginfod import buildid
-from debuginfod.db import Database
 from debuginfod.benchmark_store import BenchmarkStore
-from debuginfod.delta_store import DeltaStore
+from debuginfod.db import Database
 from debuginfod.elfsection import extract_first
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
@@ -23,6 +22,10 @@ from debuginfod.scan_runner import ScanRunner
 logger = logging.getLogger(__name__)
 
 _SECTION_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+
+class DedupRestorer(Protocol):
+    def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str: ...
 
 
 def _validate_source_path(path: str) -> None:
@@ -37,17 +40,38 @@ def _validate_section_name(name: str) -> None:
         raise HTTPException(status_code=400, detail="invalid section name")
 
 
+def _resolve_file_path(
+    cache_dir: Path,
+    file_path: str,
+    restorer: DedupRestorer | None,
+) -> Path:
+    if not file_path:
+        raise HTTPException(status_code=404, detail="not found")
+    if restorer is not None:
+        try:
+            resolved = restorer.restore_to_cache(cache_dir, file_path)
+            return Path(resolved)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        except Exception as exc:
+            logger.exception("Restore failed for %s", file_path)
+            raise HTTPException(status_code=500, detail="restore failed") from exc
+    path = Path(file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return path
+
+
 def create_app(
     db: Database,
-    store: DeltaStore,
     scan_runner: ScanRunner | None,
+    cache_dir: Path,
+    dedup_restorer: DedupRestorer | None = None,
     metadata_maxtime_sec: float = 5.0,
     metadata_page_size: int = 100,
     admin_key: str = "",
     ui_enabled: bool = True,
     metrics: MetricsCollector | None = None,
-    blob_dir: Path | None = None,
-    reconstruct_cache_dir: Path | None = None,
     benchmark_store: BenchmarkStore | None = None,
     benchmark_go_url: str = "http://localhost:8002",
     benchmark_py_url: str = "http://localhost:8003",
@@ -56,8 +80,9 @@ def create_app(
     benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="debuginfod-python", version="0.1.0")
+    app = FastAPI(title="debuginfod-python", version="0.2.0")
     collector = metrics or MetricsCollector()
+    cache_root = cache_dir.resolve()
 
     @app.middleware("http")
     async def record_http_requests(request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
@@ -65,19 +90,11 @@ def create_app(
         collector.record_http()
         return response
 
-    def _stream_content(content_hash: str) -> StreamingResponse:
-        try:
-            data = store.reconstruct(content_hash)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="not found") from exc
-        except Exception as exc:
-            logger.exception("Reconstruction failed for %s", content_hash)
-            raise HTTPException(status_code=500, detail="reconstruction failed") from exc
-
-        return StreamingResponse(
-            iter([data]),
+    def _file_response(path: Path) -> FileResponse:
+        return FileResponse(
+            path,
             media_type="application/octet-stream",
-            headers={"Content-Length": str(len(data))},
+            filename=path.name,
         )
 
     @app.get("/healthz")
@@ -108,8 +125,33 @@ def create_app(
             {
                 "status": "ok",
                 "files_indexed": result.files_indexed,
-                "deltas_stored": result.deltas_stored,
-                "full_stored": result.full_stored,
+                "files_skipped": result.files_skipped,
+                "errors": result.errors,
+            }
+        )
+
+    @app.post("/admin/dedup-backfill")
+    async def admin_dedup_backfill(
+        request: Request,
+        project: str = Query(""),
+        dry_run: bool = Query(False),
+    ) -> JSONResponse:
+        if admin_key:
+            token = request.headers.get("X-Admin-Token") or request.query_params.get("key", "")
+            if token != admin_key:
+                raise HTTPException(status_code=401, detail="unauthorized")
+        if dedup_restorer is None or not hasattr(dedup_restorer, "run_backfill"):
+            raise HTTPException(status_code=503, detail="dedup disabled")
+        result = dedup_restorer.run_backfill(project=project, dry_run=dry_run)  # type: ignore[attr-defined]
+        return JSONResponse(
+            {
+                "status": "ok",
+                "files_registered": result.files_registered,
+                "files_compressed": result.files_compressed,
+                "errors": result.errors,
+                "bytes_before": result.bytes_before,
+                "bytes_after": result.bytes_after,
+                "dry_run": result.dry_run,
             }
         )
 
@@ -135,9 +177,6 @@ def create_app(
                     **({"archive": r.archive} if r.archive else {}),
                     **({"buildid_kind": r.buildid_kind} if r.buildid_kind else {}),
                     **({"raw_buildid": r.raw_buildid} if r.raw_buildid else {}),
-                    "storage_kind": r.storage_kind,
-                    "content_hash": r.content_hash,
-                    "compression_ratio": round(r.compression_ratio, 4),
                 }
                 for r in results
             ],
@@ -165,23 +204,26 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="not found")
 
-        return _stream_content(record.content_hash)
+        file_path = record.file_path or record.archive_path
+        if not file_path:
+            raise HTTPException(status_code=404, detail="not found")
+        return _file_response(_resolve_file_path(cache_root, file_path, dedup_restorer))
 
     @app.get("/buildid/{build_id}/section/{section_name}")
     async def buildid_section(build_id: str, section_name: str) -> Response:
         _validate_section_name(section_name)
         bid = buildid.normalize(build_id)
 
-        blobs: list[bytes] = []
+        paths: list[Path] = []
         for artifact_type in ("debuginfo", "executable"):
             artifact = db.get_artifact(bid, artifact_type)
-            if artifact is not None:
+            if artifact is not None and artifact.file_path:
                 try:
-                    blobs.append(store.reconstruct(artifact.content_hash))
-                except Exception:
+                    paths.append(_resolve_file_path(cache_root, artifact.file_path, dedup_restorer))
+                except HTTPException:
                     logger.debug("Failed to load %s for section", artifact_type, exc_info=True)
 
-        section_data = extract_first(blobs, section_name)
+        section_data = extract_first([p.read_bytes() for p in paths], section_name)
         if section_data is None:
             raise HTTPException(status_code=404, detail="not found")
 
@@ -196,7 +238,9 @@ def create_app(
         artifact = db.get_artifact(bid, artifact_type)
         if artifact is None:
             raise HTTPException(status_code=404, detail="not found")
-        return _stream_content(artifact.content_hash)
+        if not artifact.file_path:
+            raise HTTPException(status_code=404, detail="not found")
+        return _file_response(_resolve_file_path(cache_root, artifact.file_path, dedup_restorer))
 
     if ui_enabled:
         from debuginfod.webui import register_webui
@@ -205,8 +249,7 @@ def create_app(
             app,
             db=db,
             metrics=collector,
-            blob_dir=blob_dir or store.blob_dir,
-            reconstruct_cache_dir=reconstruct_cache_dir or store.reconstruct_cache_dir,
+            cache_dir=cache_root,
             benchmark_store=benchmark_store,
             benchmark_go_url=benchmark_go_url,
             benchmark_py_url=benchmark_py_url,

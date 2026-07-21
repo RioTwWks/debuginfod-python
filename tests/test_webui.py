@@ -9,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from debuginfod.db import Database
-from debuginfod.delta_store import DeltaStore
 from debuginfod.indexer import Indexer
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
@@ -18,17 +17,9 @@ from debuginfod.webapi import create_app
 
 @pytest.fixture
 def ui_client(tmp_path: Path) -> TestClient:
-    try:
-        subprocess.run(["xdelta3", "-V"], capture_output=True, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pytest.skip("xdelta3 not installed")
-
     db = Database(tmp_path / "ui.sqlite")
-    store = DeltaStore(
-        db=db,
-        blob_dir=tmp_path / "blobs",
-        reconstruct_cache_dir=tmp_path / "cache",
-    )
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir()
 
@@ -41,17 +32,15 @@ def ui_client(tmp_path: Path) -> TestClient:
     subprocess.run(["gcc", "-g", "-O0", "-o", str(binary), str(src)], check=True)
 
     metrics = MetricsCollector()
-    indexer = Indexer(db=db, store=store, scan_paths=[scan_dir])
+    indexer = Indexer(db=db, scan_paths=[scan_dir])
     runner = ScanRunner(indexer=indexer, interval_sec=3600, metrics=metrics)
     runner.run_once()
 
     app = create_app(
         db=db,
-        store=store,
         scan_runner=runner,
+        cache_dir=cache_dir,
         metrics=metrics,
-        blob_dir=tmp_path / "blobs",
-        reconstruct_cache_dir=tmp_path / "cache",
         ui_enabled=True,
     )
     return TestClient(app)

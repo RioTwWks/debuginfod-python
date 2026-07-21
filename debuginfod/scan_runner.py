@@ -57,11 +57,9 @@ class ScanRunner:
                 duration_sec=duration,
             )
         logger.info(
-            "Scan complete: indexed=%d skipped=%d deltas=%d full=%d errors=%d",
+            "Scan complete: indexed=%d skipped=%d errors=%d",
             stats.files_indexed,
             stats.files_skipped,
-            stats.deltas_stored,
-            stats.full_stored,
             stats.errors,
         )
         if self.on_complete:
