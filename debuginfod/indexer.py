@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
+import sys
 import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -16,6 +18,43 @@ from debuginfod.index_worker import IndexWorkerResult, process_elf_path
 from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
+
+
+def _main_script_path() -> str | None:
+    main_mod = sys.modules.get("__main__")
+    if main_mod is None:
+        return None
+    main_file = getattr(main_mod, "__file__", None)
+    if not main_file or main_file in {"<stdin>", "-"}:
+        return None
+    return main_file
+
+
+def _create_scan_executor(workers: int, use_process_pool: bool) -> ProcessPoolExecutor | ThreadPoolExecutor:
+    """Process pool needs a real __main__ file (not stdin); prefer fork on Linux."""
+    if not use_process_pool or _main_script_path() is None:
+        if use_process_pool:
+            logger.debug("Process pool unavailable for this entrypoint; using threads")
+        return ThreadPoolExecutor(max_workers=workers)
+
+    if sys.platform == "linux":
+        methods = ("fork", "forkserver", "spawn")
+    else:
+        methods = ("spawn", "forkserver")
+
+    for method in methods:
+        try:
+            ctx = mp.get_context(method)
+            return ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=ctx,
+                max_tasks_per_child=1,
+            )
+        except (ValueError, OSError):
+            continue
+
+    logger.warning("Process pool unavailable; falling back to thread pool")
+    return ThreadPoolExecutor(max_workers=workers)
 
 
 @dataclass
@@ -72,14 +111,10 @@ class Indexer:
 
         batch_size = max(self.workers * 2, 8)
         batch: list[Path] = []
-        pool_cls = ProcessPoolExecutor if self._use_process_pool else ThreadPoolExecutor
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
 
         try:
-            pool_kwargs: dict[str, object] = {"max_workers": self.workers}
-            if self._use_process_pool:
-                pool_kwargs["max_tasks_per_child"] = 1
-            pool = pool_cls(**pool_kwargs)  # type: ignore[arg-type]
+            pool = _create_scan_executor(self.workers, self._use_process_pool)
             with self._executor_lock:
                 self._executor = pool
 
