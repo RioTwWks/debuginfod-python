@@ -46,6 +46,7 @@ def _group_peak_bytes(group: list, opts: PipelineOptions) -> int:
 
 
 def _file_exceeds_dedup_max(record: DedupFileRecord, opts: PipelineOptions) -> bool:
+    if opts.dedup_max_file_mb <= 0:
         return False
     limit = opts.dedup_max_file_mb * 1024 * 1024
     size = int(record.original_size or 0)
