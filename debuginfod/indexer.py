@@ -1,18 +1,18 @@
-"""Filesystem scanner that ingests ELF files into delta storage."""
+"""Filesystem scanner — metadata index only (debuginfod-go parity)."""
 
 from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from elftools.elf.elffile import ELFFile
 
 from debuginfod import buildid
 from debuginfod.db import ArtifactRecord, Database, SourceRecord
-from debuginfod.delta_store import DeltaStore
-from debuginfod.quik_indexer import QuikIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -24,45 +24,29 @@ class ScanStats:
     files_skipped: int = 0
     errors: int = 0
     artifacts_added: int = 0
-    deltas_stored: int = 0
-    full_stored: int = 0
-    quik_batches: int = 0
-    quik_verify_passed: int = 0
-    quik_verify_failed: int = 0
-    quik_bytes_saved: int = 0
+    dedup_files_registered: int = 0
+    dedup_files_compressed: int = 0
+    dedup_errors: int = 0
 
 
 class Indexer:
-    """Walk scan paths and index ELF artifacts with xdelta3 storage."""
+    """Walk scan paths and index ELF artifacts by file path (no blob storage)."""
 
     def __init__(
         self,
         db: Database,
-        store: DeltaStore,
         scan_paths: list[Path],
-        quik_indexer: QuikIndexer | None = None,
+        workers: int = 4,
+        dedup_hook: object | None = None,
     ) -> None:
         self.db = db
-        self.store = store
         self.scan_paths = [p.resolve() for p in scan_paths]
-        self.quik_indexer = quik_indexer
+        self.workers = max(1, workers)
+        self.dedup_hook = dedup_hook
 
     def scan(self) -> ScanStats:
         stats = ScanStats()
-
-        if self.quik_indexer is not None:
-            quik_stats = self.quik_indexer.scan()
-            stats.files_indexed += quik_stats.files_indexed
-            stats.deltas_stored += quik_stats.deltas_stored
-            stats.full_stored += quik_stats.full_stored
-            stats.errors += quik_stats.errors
-            stats.quik_batches = quik_stats.batches_seen
-            stats.quik_verify_passed = quik_stats.verify_passed
-            stats.quik_verify_failed = quik_stats.verify_failed
-            stats.quik_bytes_saved = quik_stats.bytes_saved
-
-        elf_files: list[Path] = []
-        source_files: list[Path] = []
+        jobs: list[Path] = []
 
         for root in self.scan_paths:
             if not root.exists():
@@ -70,33 +54,48 @@ class Indexer:
                 continue
             if root.is_file():
                 if buildid.is_elf(root):
-                    elf_files.append(root.resolve())
+                    stats.files_seen += 1
+                    if self._should_scan(root):
+                        jobs.append(root.resolve())
+                    else:
+                        stats.files_skipped += 1
                 continue
             for dirpath, _dirnames, filenames in os.walk(root):
                 for name in filenames:
                     path = Path(dirpath) / name
                     stats.files_seen += 1
-                    if buildid.is_elf(path):
-                        elf_files.append(path.resolve())
-                    elif name.endswith((".c", ".h", ".cpp", ".cc", ".hpp", ".s", ".S")):
-                        source_files.append(path.resolve())
+                    if not buildid.is_elf(path):
+                        continue
+                    if not self._should_scan(path):
+                        stats.files_skipped += 1
+                        continue
+                    jobs.append(path.resolve())
 
-        # Индексируем ELF в порядке mtime — дельты строятся от более ранних версий.
-        elf_files.sort(key=lambda p: p.stat().st_mtime_ns if hasattr(p.stat(), "st_mtime_ns") else int(p.stat().st_mtime * 1e9))
+        if jobs:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                futures = {pool.submit(self._index_elf_file, path): path for path in jobs}
+                for future in as_completed(futures):
+                    path = futures[future]
+                    try:
+                        indexed = future.result()
+                        if indexed:
+                            stats.files_indexed += 1
+                            stats.artifacts_added += 1
+                        else:
+                            stats.files_skipped += 1
+                    except Exception:
+                        stats.errors += 1
+                        logger.exception("Failed to index %s", path)
 
-        for path in elf_files:
+        if self.dedup_hook is not None:
             try:
-                self._index_elf_file(path, stats)
+                self.dedup_hook.run_ingest_after_scan()
+                dedup = self.db.dedup_stats()
+                stats.dedup_files_registered = int(dedup.get("total_files", 0))
+                stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
             except Exception:
-                stats.errors += 1
-                logger.exception("Failed to index %s", path)
-
-        for path in source_files:
-            try:
-                self._index_source_file(path, stats)
-            except Exception:
-                stats.errors += 1
-                logger.exception("Failed to index %s", path)
+                stats.dedup_errors += 1
+                logger.exception("Dedup ingest after scan failed")
 
         return stats
 
@@ -113,83 +112,51 @@ class Indexer:
         mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
         self.db.mark_scanned(str(path.resolve()), mtime_ns, st.st_size, kind)
 
-    def _index_elf_file(self, path: Path, stats: ScanStats) -> None:
-        if not self._should_scan(path):
-            stats.files_skipped += 1
-            return
-
-        data = path.read_bytes()
+    def _index_elf_file(self, path: Path) -> bool:
         try:
-            bid = buildid.from_bytes(data)
+            bid = buildid.from_path(path)
         except buildid.BuildIDNotFoundError:
-            stats.files_skipped += 1
-            self._mark_scanned(path, "elf")
-            return
+            self._mark_scanned(path, "no_build_id")
+            logger.debug("skip elf without build-id: %s", path)
+            return False
 
-        from io import BytesIO
+        with path.open("rb") as fh:
+            elffile = ELFFile(fh)
+            artifact_type_name = buildid.artifact_type(str(path), elffile)
 
-        elffile = ELFFile(BytesIO(data))
-        artifact_type_name = buildid.artifact_type(str(path), elffile)
-        fam = buildid.family_key(artifact_type_name, str(path.resolve()))
-
-        blob, base_build_id = self.store.store_content(
-            data,
-            family_key=fam,
-            build_id=bid.value,
-        )
-
+        mtime_ns = getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))
         record = ArtifactRecord(
             build_id=bid.value,
             artifact_type=artifact_type_name,
             file_path=str(path.resolve()),
-            content_hash=blob.content_hash,
-            storage_kind=blob.storage_kind,
             build_id_kind=bid.kind,
             raw_build_id=bid.raw,
-            family_key=fam,
-            base_build_id=base_build_id,
-            mtime_ns=getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000)),
-            original_size=blob.original_size,
-            stored_size=blob.stored_size,
+            mtime_ns=mtime_ns,
         )
         with self.db.transaction():
             self.db.upsert_artifact(record)
             self._mark_scanned(path, "elf")
-            self._index_dwarf_sources(path, data, bid.value, stats)
-
-        stats.files_indexed += 1
-        stats.artifacts_added += 1
-        if blob.storage_kind == "delta":
-            stats.deltas_stored += 1
-        else:
-            stats.full_stored += 1
+            self._index_dwarf_sources(path, bid.value)
 
         logger.info(
-            "Indexed %s build_id=%s type=%s storage=%s ratio=%.2f",
+            "Indexed %s build_id=%s type=%s",
             path,
             bid.value[:12],
             artifact_type_name,
-            blob.storage_kind,
-            blob.stored_size / max(blob.original_size, 1),
         )
+        return True
 
-    def _index_dwarf_sources(
-        self,
-        elf_path: Path,
-        data: bytes,
-        build_id_value: str,
-        stats: ScanStats,
-    ) -> None:
-        from io import BytesIO
-
+    def _index_dwarf_sources(self, elf_path: Path, build_id_value: str) -> None:
         try:
-            elffile = ELFFile(BytesIO(data))
-            if not elffile.has_dwarf_info():
-                return
-            dwarf = elffile.get_dwarf_info()
+            with elf_path.open("rb") as fh:
+                elffile = ELFFile(fh)
+                if not elffile.has_dwarf_info():
+                    return
+                dwarf = elffile.get_dwarf_info()
         except Exception:
             return
 
+        seen: set[str] = set()
         for cu in dwarf.iter_CUs():
             try:
                 top = cu.get_top_DIE()
@@ -213,24 +180,21 @@ class Indexer:
                 else:
                     continue
 
-                src = Path(source_path)
-                if not src.is_file():
+                if source_path in seen:
+                    continue
+                seen.add(source_path)
+
+                src = self._find_source_on_disk(source_path, elf_path)
+                if src is None:
                     continue
                 if not self._should_scan(src):
                     continue
-
-                src_data = src.read_bytes()
-                blob = self.store.store_full(src_data)
-                fam = buildid.family_key("source", source_path)
-                self.db.set_family_latest(fam, blob.content_hash, build_id_value)
 
                 self.db.upsert_source(
                     SourceRecord(
                         build_id=build_id_value,
                         source_path=source_path,
                         file_path=str(src.resolve()),
-                        content_hash=blob.content_hash,
-                        storage_kind=blob.storage_kind,
                         mtime_ns=getattr(
                             src.stat(),
                             "st_mtime_ns",
@@ -242,24 +206,15 @@ class Indexer:
             except Exception:
                 logger.debug("DWARF CU source extraction failed for %s", elf_path, exc_info=True)
 
-    def _index_source_file(self, path: Path, stats: ScanStats) -> None:
-        if not self._should_scan(path):
-            stats.files_skipped += 1
-            return
-        # Standalone sources without build-id binding are indexed by path suffix only.
-        data = path.read_bytes()
-        blob = self.store.store_full(data)
-        source_path = str(path.resolve())
-        with self.db.transaction():
-            self.db.upsert_source(
-                SourceRecord(
-                    build_id="",
-                    source_path=source_path,
-                    file_path=source_path,
-                    content_hash=blob.content_hash,
-                    storage_kind=blob.storage_kind,
-                    mtime_ns=getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000)),
-                )
-            )
-            self._mark_scanned(path, "source")
-        stats.files_indexed += 1
+    @staticmethod
+    def _find_source_on_disk(source_path: str, elf_path: Path) -> Path | None:
+        candidates = [Path(source_path)]
+        if not source_path.startswith("/"):
+            candidates.append(elf_path.parent / source_path)
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.resolve()
+            except OSError:
+                continue
+        return None

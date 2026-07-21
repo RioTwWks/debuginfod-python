@@ -9,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from debuginfod.db import Database
-from debuginfod.delta_store import DeltaStore
 from debuginfod.indexer import Indexer
 from debuginfod.scan_runner import ScanRunner
 from debuginfod.webapi import create_app
@@ -17,21 +16,12 @@ from debuginfod.webapi import create_app
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
-    try:
-        subprocess.run(["xdelta3", "-V"], capture_output=True, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pytest.skip("xdelta3 not installed")
-
     db = Database(tmp_path / "api.sqlite")
-    store = DeltaStore(
-        db=db,
-        blob_dir=tmp_path / "blobs",
-        reconstruct_cache_dir=tmp_path / "cache",
-    )
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir()
 
-    # Build a tiny ELF with debug info
     src = tmp_path / "hello.c"
     src.write_text(
         '#include <stdio.h>\n'
@@ -40,11 +30,11 @@ def client(tmp_path: Path) -> TestClient:
     binary = scan_dir / "hello"
     subprocess.run(["gcc", "-g", "-O0", "-o", str(binary), str(src)], check=True)
 
-    indexer = Indexer(db=db, store=store, scan_paths=[scan_dir])
+    indexer = Indexer(db=db, scan_paths=[scan_dir])
     runner = ScanRunner(indexer=indexer, interval_sec=3600)
     runner.run_once()
 
-    app = create_app(db=db, store=store, scan_runner=runner)
+    app = create_app(db=db, scan_runner=runner, cache_dir=cache_dir)
     return TestClient(app)
 
 
