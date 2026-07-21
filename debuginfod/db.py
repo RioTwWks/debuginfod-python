@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -98,12 +99,14 @@ class Database(DedupDbMixin):
         else:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self._migrate()
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
         if self._dialect == "postgresql":
             sql = sql.replace("?", "%s")
-        return self._conn.execute(sql, params)
+        with self._lock:
+            return self._conn.execute(sql, params)
 
     def _migrate(self) -> None:
         if self._dialect == "postgresql":
@@ -235,12 +238,13 @@ class Database(DedupDbMixin):
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Connection, None, None]:
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def needs_scan(self, path: str, mtime_ns: int, size: int) -> bool:
         row = self._execute(

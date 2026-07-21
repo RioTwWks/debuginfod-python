@@ -55,29 +55,22 @@ jobs:
       - name: Generate test ELF versions
         run: python scripts/generate_test_artifacts.py -o /tmp/versions -n 5
 
-      - name: Smoke test xdelta3 delta storage
+      - name: Smoke test file-based index
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
           from debuginfod.db import Database
-          from debuginfod.delta_store import DeltaStore
           from debuginfod.indexer import Indexer
 
           db = Database(Path("/tmp/ci-debuginfod.sqlite"))
-          store = DeltaStore(
-              db=db,
-              blob_dir=Path("/tmp/ci-blobs"),
-              reconstruct_cache_dir=Path("/tmp/ci-cache"),
-          )
-          stats = Indexer(db=db, store=store, scan_paths=[Path("/tmp/versions")]).scan()
+          stats = Indexer(db=db, scan_paths=[Path("/tmp/versions")]).scan()
           report = db.get_stats()
 
           assert stats.files_indexed == 5, stats
-          assert stats.deltas_stored >= 4, stats
           assert report["artifact_count"] == 5, report
-          assert report["compression_ratio"] < 0.5, report
+          assert report["bytes_on_disk"] > 0, report
 
           print(json.dumps(report, indent=2))
           PY
@@ -86,7 +79,7 @@ jobs:
         run: |
           python -m debuginfod \
             -d /tmp/ci-http.sqlite \
-            --blob-dir /tmp/ci-http-blobs \
+            --cache-dir /tmp/ci-http-cache \
             -s /tmp/versions \
             -p 18003 &
           server_pid=$!
