@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,13 @@ class Preprocessor(ABC):
     def available(self) -> bool: ...
 
     @abstractmethod
-    def apply_in_place(self, path: str | Path) -> None: ...
+    def apply_in_place(
+        self,
+        path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> None: ...
 
 
 class NoPreprocessor(Preprocessor):
@@ -29,7 +38,13 @@ class NoPreprocessor(Preprocessor):
     def available(self) -> bool:
         return True
 
-    def apply_in_place(self, path: str | Path) -> None:
+    def apply_in_place(
+        self,
+        path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> None:
         return None
 
 
@@ -44,16 +59,28 @@ class DecompressDwzPreprocessor(Preprocessor):
     def available(self) -> bool:
         return shutil.which(self.dwz) is not None and shutil.which(self.objcopy) is not None
 
-    def apply_in_place(self, path: str | Path) -> None:
+    def apply_in_place(
+        self,
+        path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> None:
+        from debuginfod.memlimit import run_subprocess_monitored
+
         p = str(path)
-        result = subprocess.run(
+        result = run_subprocess_monitored(
             [self.objcopy, "--decompress-debug-sections", p],
-            capture_output=True,
-            check=False,
+            memory_governor=memory_governor,
+            stop_event=stop_event,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[:512])
-        result = subprocess.run([self.dwz, p], capture_output=True, check=False)
+        result = run_subprocess_monitored(
+            [self.dwz, p],
+            memory_governor=memory_governor,
+            stop_event=stop_event,
+        )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[:512])
 
@@ -65,12 +92,20 @@ class ObjcopyZstd:
     def available(self) -> bool:
         return shutil.which(self.bin) is not None
 
-    def compress_in_place(self, path: str | Path) -> int:
+    def compress_in_place(
+        self,
+        path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> int:
+        from debuginfod.memlimit import run_subprocess_monitored
+
         p = str(path)
-        result = subprocess.run(
+        result = run_subprocess_monitored(
             [self.bin, "--compress-debug-sections=zstd", p],
-            capture_output=True,
-            check=False,
+            memory_governor=memory_governor,
+            stop_event=stop_event,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[:512])
@@ -82,10 +117,10 @@ def decompress_debug_sections(objcopy: str, src_path: str | Path, dst_path: str 
 
     copy_file_atomic(src_path, dst_path)
     bin_path = objcopy or "objcopy"
-    result = subprocess.run(
+    from debuginfod.memlimit import run_subprocess_monitored
+
+    result = run_subprocess_monitored(
         [bin_path, "--decompress-debug-sections", str(dst_path)],
-        capture_output=True,
-        check=False,
     )
     if result.returncode != 0:
         Path(dst_path).unlink(missing_ok=True)

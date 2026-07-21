@@ -47,15 +47,28 @@ def process_groups(
         return 0, 0, 0, 0, 0
 
     largest = max(_largest_file_bytes(job) for job in jobs)
+    peak_factor = opts.dedup_peak_factor
     workers = opts.workers
-    if memory_governor is not None:
-        workers = memory_governor.effective_workers(opts.workers, largest)
+    serial_bytes = max(0, opts.dedup_serial_above_mb) * 1024 * 1024
+    if serial_bytes > 0 and largest > serial_bytes:
+        if workers > 1:
+            logger.info(
+                "Dedup forced serial (largest file %.1f MiB > %d MiB threshold)",
+                largest / (1024 * 1024),
+                opts.dedup_serial_above_mb,
+            )
+        workers = 1
+    elif memory_governor is not None:
+        workers = memory_governor.effective_workers(
+            opts.workers, largest, peak_factor=peak_factor
+        )
         if workers < opts.workers:
             logger.info(
-                "Dedup parallelism reduced %d -> %d (largest file %.1f MiB)",
+                "Dedup parallelism reduced %d -> %d (largest file %.1f MiB, peak=%.1fx)",
                 opts.workers,
                 workers,
                 largest / (1024 * 1024),
+                peak_factor,
             )
 
     if opts.dry_run or workers <= 1 or len(jobs) <= 1:
@@ -76,7 +89,9 @@ def process_groups(
                 return False
             peak_bytes = _largest_file_bytes(job)
             if memory_governor is not None:
-                if not memory_governor.wait_for_job(peak_bytes, stop_event):
+                if not memory_governor.wait_for_job(
+                    peak_bytes, stop_event, peak_factor=peak_factor
+                ):
                     return False
             pending[pool.submit(_run_group_job, opts, job, memory_governor, stop_event)] = job
             return True
@@ -118,7 +133,9 @@ def _run_sequential(
             break
         peak_bytes = _largest_file_bytes(job)
         if memory_governor is not None:
-            if not memory_governor.wait_for_job(peak_bytes, stop_event):
+            if not memory_governor.wait_for_job(
+                peak_bytes, stop_event, peak_factor=opts.dedup_peak_factor
+            ):
                 break
         c, s, e, bb, ba = _run_group_job(opts, job, memory_governor, stop_event)
         compressed += c
@@ -151,7 +168,9 @@ def _run_group_job(
     peak_bytes = _largest_file_bytes(group)
     budget = None
     if memory_governor is not None:
-        budget = memory_governor.acquire_job_budget(peak_bytes, stop_event)
+        budget = memory_governor.acquire_job_budget(
+            peak_bytes, stop_event, peak_factor=opts.dedup_peak_factor
+        )
         if budget is None:
             return 0, 0, 1, sum(f.original_size for f in group), 0
 

@@ -42,6 +42,9 @@ class Settings:
     memory_max_swap_mb: int = 0
     memory_min_available_mb: int = 512
     memory_dedup_peak_factor: float = 3.0
+    memory_dedup_peak_factor_decompress: float = 10.0
+    memory_dedup_serial_above_mb: int = 64
+    memory_max_system_ram_pct: int = 75
     scan_dwarf_max_mb: int = 128
     # legacy blob settings (kept for compatibility, unused in Go-parity mode)
     blob_dir: Path = Path(".debuginfod-blobs")
@@ -124,6 +127,11 @@ def load_settings(env_file: str | None = None) -> Settings:
         memory_max_swap_mb=_env_int("DEBUGINFOD_MEMORY_MAX_SWAP_MB", 0),
         memory_min_available_mb=_env_int("DEBUGINFOD_MEMORY_MIN_AVAILABLE_MB", 512),
         memory_dedup_peak_factor=_env_float("DEBUGINFOD_MEMORY_DEDUP_PEAK_FACTOR", 3.0),
+        memory_dedup_peak_factor_decompress=_env_float(
+            "DEBUGINFOD_MEMORY_DEDUP_PEAK_FACTOR_DECOMPRESS", 10.0
+        ),
+        memory_dedup_serial_above_mb=_env_int("DEBUGINFOD_MEMORY_DEDUP_SERIAL_ABOVE_MB", 64),
+        memory_max_system_ram_pct=_env_int("DEBUGINFOD_MEMORY_MAX_SYSTEM_RAM_PCT", 75),
         scan_dwarf_max_mb=_env_int("DEBUGINFOD_SCAN_DWARF_MAX_MB", 128),
         blob_dir=Path(os.getenv("DEBUGINFOD_BLOB_DIR", ".debuginfod-blobs")),
         reconstruct_cache_dir=cache_dir,
