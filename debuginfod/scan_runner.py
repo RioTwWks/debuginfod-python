@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -50,8 +51,11 @@ class ScanRunner:
         return self._last_stats
 
     def request_stop(self) -> None:
+        if self._stop.is_set():
+            return
         self._stop.set()
         self.indexer.request_stop()
+        logger.info("Scan stop requested")
 
     def run_once(self) -> ScanStats:
         if self._stop.is_set():
@@ -79,7 +83,7 @@ class ScanRunner:
             if not stats.cancelled:
                 self._ready = True
 
-        if self.metrics is not None:
+        if self.metrics is not None and not stats.cancelled:
             self.metrics.record_scan(
                 indexed=stats.files_indexed,
                 skipped=stats.files_skipped,
@@ -130,12 +134,22 @@ class ScanRunner:
         self._thread = threading.Thread(target=self._loop, daemon=True, name="scan-runner")
         self._thread.start()
 
-    def stop(self, timeout: float = 3.0) -> None:
+    def stop(self, timeout: float = 1.0, force_exit: bool = True) -> None:
+        """Request scan stop and wait briefly for the background thread."""
         self.request_stop()
-        if self._thread is not None:
+        if self._thread is None:
+            return
+        try:
             self._thread.join(timeout=timeout)
-            if self._thread.is_alive():
-                logger.warning("Scan thread did not stop within %.0fs", timeout)
+        except KeyboardInterrupt:
+            logger.warning("Interrupted while waiting for scan thread")
+            if force_exit:
+                os._exit(130)
+            raise
+        if self._thread.is_alive():
+            logger.warning("Scan thread still running after %.1fs", timeout)
+            if force_exit:
+                os._exit(130)
 
     def _loop(self) -> None:
         if not self._stop.is_set():

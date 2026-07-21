@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,7 @@ from debuginfod.dedup.service import DedupConfig, DedupService
 from debuginfod.indexer import Indexer
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
+from debuginfod.shutdown import install_scan_shutdown_handlers
 from debuginfod.webapi import create_app
 
 
@@ -71,10 +73,20 @@ def main(argv: list[str] | None = None) -> None:
         metrics=metrics,
     )
     if settings.scan_enabled:
+        install_scan_shutdown_handlers(scan_runner)
         scan_runner.start()
 
     benchmark_store = BenchmarkStore()
     py_url = f"http://localhost:{settings.port}"
+
+    @asynccontextmanager
+    async def lifespan(_app):  # type: ignore[no-untyped-def]
+        if settings.scan_enabled:
+            install_scan_shutdown_handlers(scan_runner)
+        yield
+        if settings.scan_enabled:
+            logger.info("Application shutdown: stopping scan")
+            scan_runner.stop(timeout=0.5, force_exit=False)
 
     app = create_app(
         db=db,
@@ -95,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
         benchmark_go_admin_key=settings.benchmark_go_admin_key,
         benchmark_py_admin_key=settings.benchmark_py_admin_key,
         scan_paths=settings.scan_paths,
+        lifespan=lifespan,
     )
 
     try:
@@ -102,8 +115,8 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Shutdown requested")
     finally:
-        if settings.scan_enabled and scan_runner is not None:
-            scan_runner.stop(timeout=2.0)
+        if settings.scan_enabled:
+            scan_runner.request_stop()
         db.close()
 
 

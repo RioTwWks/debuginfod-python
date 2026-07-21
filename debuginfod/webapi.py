@@ -81,8 +81,9 @@ def create_app(
     benchmark_go_admin_key: str = "",
     benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
+    lifespan=None,
 ) -> FastAPI:
-    app = FastAPI(title="debuginfod-python", version="0.2.0")
+    app = FastAPI(title="debuginfod-python", version="0.2.0", lifespan=lifespan)
     collector = metrics or MetricsCollector()
     cache_root = cache_dir.resolve()
 
