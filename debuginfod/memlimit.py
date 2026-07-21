@@ -13,10 +13,16 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_DEDUP_PEAK_FACTOR = 3.0
-DEFAULT_DEDUP_PEAK_FACTOR_DECOMPRESS = 10.0
-DEFAULT_MAX_SYSTEM_RAM_USED_PCT = 75
-DEFAULT_MAX_RSS_RAM_PCT = 45
+DEFAULT_DEDUP_PEAK_FACTOR_DECOMPRESS = 20.0
+DEFAULT_MAX_SYSTEM_RAM_USED_PCT = 65
+DEFAULT_MAX_RSS_RAM_PCT = 35
+DECOMPRESS_PEAK_MIN_MULTIPLIER = 20.0
+SOFT_RSS_RATIO = 0.70
 SCAN_JOB_PEAK_FACTOR = 1.5
+SUBPROCESS_POLL_SEC = 0.05
+RECOVERY_STABLE_POLLS = 3
+
+_subprocess_gate = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -216,6 +222,33 @@ def estimate_dedup_peak_bytes(file_bytes: int, peak_factor: float) -> int:
     return max(file_bytes, int(file_bytes * max(1.0, peak_factor)))
 
 
+def estimate_decompress_peak_bytes(file_bytes: int, limits: MemoryLimits | None) -> int:
+    """Peak for decompress-dwz + xdelta (inflate + load base+target in xdelta3)."""
+    if file_bytes <= 0:
+        return 0
+    factor = limits.dedup_peak_factor_decompress if limits is not None else DEFAULT_DEDUP_PEAK_FACTOR_DECOMPRESS
+    multiplier = max(factor, DECOMPRESS_PEAK_MIN_MULTIPLIER)
+    return int(file_bytes * multiplier)
+
+
+def estimate_xdelta_peak_bytes(base_bytes: int, target_bytes: int) -> int:
+    """xdelta3 may hold both inputs plus working buffers in memory."""
+    return max(base_bytes + target_bytes, int((base_bytes + target_bytes) * 1.5))
+
+
+def release_heap() -> None:
+    """Return freed Python/C heap pages to the OS when possible."""
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+
+
 def _has_job_headroom(
     governor: MemoryGovernor,
     usage: MemoryUsage,
@@ -284,8 +317,12 @@ class MemoryGovernor:
             used = system_ram_used_bytes(usage)
             if used >= limits.max_system_ram_used_bytes:
                 return "system_ram"
-        if limits.max_rss_bytes > 0 and usage.rss_bytes >= limits.max_rss_bytes:
-            return "rss"
+        if limits.max_rss_bytes > 0:
+            soft = int(limits.max_rss_bytes * SOFT_RSS_RATIO)
+            if usage.rss_bytes >= limits.max_rss_bytes:
+                return "rss"
+            if usage.rss_bytes >= soft:
+                return "rss_soft"
         if limits.max_swap_bytes > 0:
             if usage.swap_bytes >= limits.max_swap_bytes:
                 return "tree_swap"
@@ -347,6 +384,82 @@ class MemoryGovernor:
                     return True
 
             self._log_pressure(reason or "job_headroom", usage, peak_bytes=peak)
+            self._sleep(self.limits.poll_interval_sec)
+
+    def wait_for_peak_bytes(
+        self,
+        peak_bytes: int,
+        stop_event: object | None = None,
+    ) -> bool:
+        """Block until limits allow a job with an absolute peak byte estimate."""
+        if not self.limits.enabled or peak_bytes <= 0:
+            return True
+
+        while True:
+            if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+                return False
+
+            with self._lock:
+                usage = process_tree_usage(self.root_pid)
+                reason = self._over_limit(usage)
+                if reason is None and _has_job_headroom(
+                    self,
+                    usage,
+                    peak_bytes,
+                    self._reserved_bytes,
+                ):
+                    return True
+
+            self._log_pressure(reason or "job_headroom", usage, peak_bytes=peak_bytes)
+            self._sleep(self.limits.poll_interval_sec)
+
+    def wait_for_recovery(self, stop_event: object | None = None) -> bool:
+        """Wait until memory is stably below soft limits (after a spike)."""
+        if not self.limits.enabled:
+            return True
+
+        ok_streak = 0
+        while ok_streak < RECOVERY_STABLE_POLLS:
+            if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+                return False
+            usage = process_tree_usage(self.root_pid)
+            reason = self._over_limit(usage)
+            if reason is None:
+                ok_streak += 1
+            else:
+                ok_streak = 0
+                self._log_pressure(reason, usage)
+            self._sleep(self.limits.poll_interval_sec)
+        release_heap()
+        return True
+
+    def acquire_peak_budget(
+        self,
+        peak_bytes: int,
+        stop_event: object | None = None,
+    ) -> JobBudget | None:
+        """Reserve RAM budget using an absolute peak byte estimate."""
+        if not self.limits.enabled:
+            return JobBudget(self, 0)
+
+        peak = max(0, peak_bytes)
+        while True:
+            if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+                return None
+
+            with self._lock:
+                usage = process_tree_usage(self.root_pid)
+                reason = self._over_limit(usage)
+                if reason is None and _has_job_headroom(
+                    self,
+                    usage,
+                    peak,
+                    self._reserved_bytes,
+                ):
+                    self._reserved_bytes += peak
+                    return JobBudget(self, peak)
+
+            self._log_pressure(reason or "job_budget", usage, peak_bytes=peak)
             self._sleep(self.limits.poll_interval_sec)
 
     def acquire_job_budget(
@@ -463,30 +576,31 @@ def run_subprocess_monitored(
     *,
     memory_governor: MemoryGovernor | None = None,
     stop_event: object | None = None,
-    poll_interval_sec: float = 0.25,
+    poll_interval_sec: float = SUBPROCESS_POLL_SEC,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run a subprocess; abort if memory limits are exceeded while it runs."""
-    import subprocess
-
     if memory_governor is None or not memory_governor.limits.enabled:
         return subprocess.run(cmd, capture_output=True, check=False)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        while proc.poll() is None:
-            if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
-                proc.terminate()
-                proc.wait(timeout=10)
-                raise RuntimeError("stopped during subprocess")
-            if memory_governor._over_limit(memory_governor.snapshot()) is not None:
-                proc.terminate()
-                proc.wait(timeout=10)
-                raise RuntimeError("memory limit exceeded during subprocess")
-            time.sleep(poll_interval_sec)
-        stdout, stderr = proc.communicate(timeout=30)
-        return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout, stderr)
-    except Exception:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-        raise
+    with _subprocess_gate:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            while proc.poll() is None:
+                if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+                    proc.terminate()
+                    proc.wait(timeout=10)
+                    raise RuntimeError("stopped during subprocess")
+                if memory_governor._over_limit(memory_governor.snapshot()) is not None:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+                    memory_governor.wait_for_recovery(stop_event)
+                    raise RuntimeError("memory limit exceeded during subprocess")
+                time.sleep(poll_interval_sec)
+            stdout, stderr = proc.communicate(timeout=30)
+            return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout, stderr)
+        except Exception:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            release_heap()
+            raise

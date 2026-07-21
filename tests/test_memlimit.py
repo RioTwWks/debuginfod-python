@@ -16,9 +16,18 @@ def test_mb_to_bytes() -> None:
     assert mb_to_bytes(1) == 1024 * 1024
 
 
-def test_estimate_dedup_peak_bytes() -> None:
-    assert estimate_dedup_peak_bytes(100, 3.0) == 300
-    assert estimate_dedup_peak_bytes(0, 3.0) == 0
+def test_estimate_decompress_peak_bytes() -> None:
+    from debuginfod.memlimit import MemoryLimits, estimate_decompress_peak_bytes
+
+    limits = MemoryLimits(dedup_peak_factor_decompress=20.0)
+    assert estimate_decompress_peak_bytes(100 * 1024 * 1024, limits) == 2000 * 1024 * 1024
+
+
+def test_soft_rss_triggers_early() -> None:
+    limits = MemoryLimits(max_rss_bytes=1000)
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(rss_bytes=750, swap_bytes=0, mem_available_bytes=10**9)
+    assert governor._over_limit(usage) == "rss_soft"
 
 
 def test_over_limit_rss() -> None:

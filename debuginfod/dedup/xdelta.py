@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +20,48 @@ class Xdelta:
     def available(self) -> bool:
         return shutil.which(self.bin) is not None
 
-    def encode(self, base_path: str | Path, target_path: str | Path, delta_path: str | Path) -> None:
+    def encode(
+        self,
+        base_path: str | Path,
+        target_path: str | Path,
+        delta_path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> None:
+        from debuginfod.memlimit import run_subprocess_monitored
+
         delta = Path(delta_path)
         delta.parent.mkdir(parents=True, exist_ok=True)
         cmd = [self.bin, "-e", "-s", str(base_path), str(target_path), str(delta)]
-        result = subprocess.run(cmd, capture_output=True, check=False)
+        result = run_subprocess_monitored(
+            cmd,
+            memory_governor=memory_governor,
+            stop_event=stop_event,
+        )
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace")[:512]
             raise RuntimeError(f"xdelta3 encode failed: {stderr}")
 
-    def decode(self, base_path: str | Path, delta_path: str | Path, out_path: str | Path) -> None:
+    def decode(
+        self,
+        base_path: str | Path,
+        delta_path: str | Path,
+        out_path: str | Path,
+        *,
+        memory_governor: MemoryGovernor | None = None,
+        stop_event: object | None = None,
+    ) -> None:
+        from debuginfod.memlimit import run_subprocess_monitored
+
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         cmd = [self.bin, "-d", "-s", str(base_path), str(delta_path), str(out)]
-        result = subprocess.run(cmd, capture_output=True, check=False)
+        result = run_subprocess_monitored(
+            cmd,
+            memory_governor=memory_governor,
+            stop_event=stop_event,
+        )
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace")[:512]
             raise RuntimeError(f"xdelta3 decode failed: {stderr}")
