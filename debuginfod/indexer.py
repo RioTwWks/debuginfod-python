@@ -202,8 +202,13 @@ class Indexer:
                 path = next(job_iter)
             except StopIteration:
                 return False
-            if self._memory is not None and not self._memory.wait_for_headroom(self._stop):
-                return False
+            if self._memory is not None:
+                try:
+                    file_bytes = path.stat().st_size
+                except OSError:
+                    file_bytes = 0
+                if not self._memory.wait_for_job(file_bytes, self._stop, peak_factor=1.5):
+                    return False
             pending[pool.submit(process_elf_path, str(path))] = path
             return True
 

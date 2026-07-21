@@ -11,6 +11,16 @@ from debuginfod.memlimit import MemoryGovernor
 logger = logging.getLogger(__name__)
 
 
+def _stopped(stop_event: object | None) -> bool:
+    return stop_event is not None and getattr(stop_event, "is_set", lambda: False)()
+
+
+def _largest_file_bytes(group: list) -> int:
+    if not group:
+        return 0
+    return max(int(getattr(f, "original_size", 0) or 0) for f in group)
+
+
 def process_groups(
     opts: PipelineOptions,
     groups: dict[str, list],
@@ -33,11 +43,25 @@ def process_groups(
         sorted_group = sorted(group, key=lambda f: (f.file_build_num, f.file_path))
         jobs.append(sorted_group)
 
-    if opts.dry_run or opts.workers <= 1 or len(jobs) <= 1:
+    if not jobs:
+        return 0, 0, 0, 0, 0
+
+    largest = max(_largest_file_bytes(job) for job in jobs)
+    workers = opts.workers
+    if memory_governor is not None:
+        workers = memory_governor.effective_workers(opts.workers, largest)
+        if workers < opts.workers:
+            logger.info(
+                "Dedup parallelism reduced %d -> %d (largest file %.1f MiB)",
+                opts.workers,
+                workers,
+                largest / (1024 * 1024),
+            )
+
+    if opts.dry_run or workers <= 1 or len(jobs) <= 1:
         return _run_sequential(opts, jobs, memory_governor=memory_governor, stop_event=stop_event)
 
     compressed = skipped = errors = bytes_before = bytes_after = 0
-    workers = max(1, opts.workers)
     pending: dict = {}
     job_iter = iter(jobs)
 
@@ -50,9 +74,11 @@ def process_groups(
                 job = next(job_iter)
             except StopIteration:
                 return False
-            if memory_governor is not None and not memory_governor.wait_for_headroom(stop_event):
-                return False
-            pending[pool.submit(_run_group_job, opts, job)] = job
+            peak_bytes = _largest_file_bytes(job)
+            if memory_governor is not None:
+                if not memory_governor.wait_for_job(peak_bytes, stop_event):
+                    return False
+            pending[pool.submit(_run_group_job, opts, job, memory_governor, stop_event)] = job
             return True
 
         for _ in range(min(workers, len(jobs))):
@@ -79,10 +105,6 @@ def process_groups(
     return compressed, skipped, errors, bytes_before, bytes_after
 
 
-def _stopped(stop_event: object | None) -> bool:
-    return stop_event is not None and getattr(stop_event, "is_set", lambda: False)()
-
-
 def _run_sequential(
     opts: PipelineOptions,
     jobs: list[list],
@@ -94,9 +116,11 @@ def _run_sequential(
     for job in jobs:
         if _stopped(stop_event):
             break
-        if memory_governor is not None and not memory_governor.wait_for_headroom(stop_event):
-            break
-        c, s, e, bb, ba = _run_group_job(opts, job)
+        peak_bytes = _largest_file_bytes(job)
+        if memory_governor is not None:
+            if not memory_governor.wait_for_job(peak_bytes, stop_event):
+                break
+        c, s, e, bb, ba = _run_group_job(opts, job, memory_governor, stop_event)
         compressed += c
         skipped += s
         errors += e
@@ -105,7 +129,12 @@ def _run_sequential(
     return compressed, skipped, errors, bytes_before, bytes_after
 
 
-def _run_group_job(opts: PipelineOptions, group: list) -> tuple[int, int, int, int, int]:
+def _run_group_job(
+    opts: PipelineOptions,
+    group: list,
+    memory_governor: MemoryGovernor | None = None,
+    stop_event: object | None = None,
+) -> tuple[int, int, int, int, int]:
     if len(group) == 1:
         if not opts.dry_run:
             try:
@@ -119,6 +148,26 @@ def _run_group_job(opts: PipelineOptions, group: list) -> tuple[int, int, int, i
         bb = sum(f.original_size for f in group)
         return len(group) - 1, 1, 0, bb, 0
 
-    c, bb, ba, err = process_group(opts, group)
+    peak_bytes = _largest_file_bytes(group)
+    budget = None
+    if memory_governor is not None:
+        budget = memory_governor.acquire_job_budget(peak_bytes, stop_event)
+        if budget is None:
+            return 0, 0, 1, sum(f.original_size for f in group), 0
+
+    try:
+        with budget or _null_context():
+            c, bb, ba, err = process_group(opts, group, memory_governor=memory_governor, stop_event=stop_event)
+    finally:
+        pass
+
     errors = 1 if err else 0
     return c, 1, errors, bb, ba
+
+
+class _null_context:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *args: object) -> None:
+        return None

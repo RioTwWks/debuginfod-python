@@ -119,12 +119,20 @@ def mark_singleton_full(opts: PipelineOptions, record: DedupFileRecord) -> None:
 def process_group(
     opts: PipelineOptions,
     group: list[DedupFileRecord],
+    *,
+    memory_governor: "MemoryGovernor | None" = None,
+    stop_event: object | None = None,
 ) -> tuple[int, int, int, Exception | None]:
+    gov = memory_governor or opts.memory_governor
     bytes_before = sum(f.original_size for f in group)
     base = group[0]
     if not Path(base.file_path).is_file():
         opts.db.mark_dedup_file_error(base.id, f"base missing: {base.file_path}")
         return 0, bytes_before, 0, FileNotFoundError(base.file_path)
+
+    base_size = int(base.original_size or Path(base.file_path).stat().st_size)
+    if gov is not None and not gov.wait_for_job(base_size, stop_event):
+        return 0, bytes_before, 0, RuntimeError("dedup stopped (memory pressure)")
 
     try:
         opts.preprocessor.apply_in_place(base.file_path)
@@ -140,8 +148,17 @@ def process_group(
     group_err: Exception | None = None
 
     for target in group[1:]:
+        if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+            group_err = RuntimeError("dedup stopped")
+            break
         try:
-            delta_size = compress_one(opts, base, target)
+            delta_size = compress_one(
+                opts,
+                base,
+                target,
+                memory_governor=gov,
+                stop_event=stop_event,
+            )
             compressed += 1
             bytes_after += delta_size
         except Exception as exc:
@@ -150,20 +167,35 @@ def process_group(
             group_err = exc
 
     if opts.compress_base and opts.objcopy_zstd.available():
-        try:
-            comp_size = opts.objcopy_zstd.compress_in_place(base.file_path)
-            opts.db.update_dedup_file_compressed_size(base.id, comp_size)
-            bytes_after = bytes_after - base_size + comp_size
-        except Exception as exc:
-            opts.db.mark_dedup_file_error(base.id, f"compress base: {exc}")
-            group_err = exc
+        if gov is not None and not gov.wait_for_job(base_size, stop_event):
+            group_err = RuntimeError("dedup stopped (memory pressure)")
+        else:
+            try:
+                comp_size = opts.objcopy_zstd.compress_in_place(base.file_path)
+                opts.db.update_dedup_file_compressed_size(base.id, comp_size)
+                bytes_after = bytes_after - base_size + comp_size
+            except Exception as exc:
+                opts.db.mark_dedup_file_error(base.id, f"compress base: {exc}")
+                group_err = exc
 
     return compressed, bytes_before, bytes_after, group_err
 
 
-def compress_one(opts: PipelineOptions, base: DedupFileRecord, target: DedupFileRecord) -> int:
+def compress_one(
+    opts: PipelineOptions,
+    base: DedupFileRecord,
+    target: DedupFileRecord,
+    *,
+    memory_governor: "MemoryGovernor | None" = None,
+    stop_event: object | None = None,
+) -> int:
+    gov = memory_governor or opts.memory_governor
     if not Path(target.file_path).is_file():
         raise FileNotFoundError(target.file_path)
+
+    target_size = int(target.original_size or Path(target.file_path).stat().st_size)
+    if gov is not None and not gov.wait_for_job(target_size, stop_event):
+        raise RuntimeError("dedup stopped (memory pressure)")
 
     work_dir = Path(tempfile.mkdtemp(prefix="dedup-prep-", dir=str(Path(target.file_path).parent)))
     try:
