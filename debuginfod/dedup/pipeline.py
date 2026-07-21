@@ -7,6 +7,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from debuginfod.db import Database, DedupFileRecord
 from debuginfod.dedup.copy import copy_file_atomic, file_sha256
@@ -14,6 +15,9 @@ from debuginfod.dedup.discover import discover
 from debuginfod.dedup.preprocess import ObjcopyZstd, Preprocessor
 from debuginfod.dedup.project_group import normalize_dedup_group_project
 from debuginfod.dedup.xdelta import Xdelta, delta_path_for
+
+if TYPE_CHECKING:
+    from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,8 @@ class PipelineOptions:
     projects: list[str] = field(default_factory=list)
     workers: int = 4
     dry_run: bool = False
+    memory_governor: "MemoryGovernor | None" = None
+    stop_event: object | None = None
 
 
 @dataclass
@@ -74,7 +80,12 @@ def run_ingest_all(opts: PipelineOptions) -> BackfillResult:
     result.groups_processed = len(groups)
     from debuginfod.dedup.workers import process_groups
 
-    compressed, skipped, errors, b_before, b_after = process_groups(opts, groups)
+    compressed, skipped, errors, b_before, b_after = process_groups(
+        opts,
+        groups,
+        memory_governor=opts.memory_governor,
+        stop_event=opts.stop_event,
+    )
     result.files_compressed = compressed
     result.files_skipped = skipped
     result.errors = errors

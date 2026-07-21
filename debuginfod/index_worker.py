@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from elftools.elf.elffile import ELFFile
 
 from debuginfod import buildid
 from debuginfod.db import ArtifactRecord, SourceRecord
+
+_DWARF_MAX_BYTES = int(os.getenv("DEBUGINFOD_SCAN_DWARF_MAX_MB", "128")) * 1024 * 1024
 
 
 @dataclass
@@ -58,7 +61,12 @@ def process_elf_path(path_str: str) -> IndexWorkerResult:
         raw_build_id=bid.raw,
         mtime_ns=mtime_ns,
     )
-    result.sources = _extract_dwarf_sources(path, bid.value)
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        file_size = 0
+    if _DWARF_MAX_BYTES <= 0 or file_size <= _DWARF_MAX_BYTES:
+        result.sources = _extract_dwarf_sources(path, bid.value)
     result.indexed = True
     result.mark_kind = "elf"
     return result
