@@ -81,13 +81,15 @@ def main(argv: list[str] | None = None) -> None:
 
     if memory_governor.limits.enabled:
         logger.info(
-            "Memory limits: max_rss=%d MiB max_swap=%d MiB (system-wide) "
-            "min_available=%d MiB dedup_peak=%.1fx dwarf_max=%d MiB",
+            "Memory limits: max_rss=%d MiB max_swap=%d MiB (tree + delta since start) "
+            "min_available=%d MiB dedup_peak=%.1fx dwarf_max=%d MiB; "
+            "system swap baseline=%.1f MiB",
             settings.memory_max_ram_mb,
             settings.memory_max_swap_mb,
             settings.memory_min_available_mb,
             settings.memory_dedup_peak_factor,
             settings.scan_dwarf_max_mb,
+            memory_governor.baseline_system_swap_bytes / (1024 * 1024),
         )
     else:
         logger.info(
