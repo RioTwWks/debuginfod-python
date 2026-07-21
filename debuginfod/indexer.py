@@ -15,7 +15,7 @@ from typing import Iterator
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.index_worker import IndexWorkerResult, process_elf_path
-from debuginfod.memlimit import MemoryGovernor
+from debuginfod.memlimit import MemoryGovernor, SCAN_JOB_PEAK_FACTOR
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,15 @@ def _main_script_path() -> str | None:
     return main_file
 
 
-def _create_scan_executor(workers: int, use_process_pool: bool) -> ProcessPoolExecutor | ThreadPoolExecutor:
+def _create_scan_executor(
+    workers: int,
+    use_process_pool: bool,
+    memory_governor: MemoryGovernor | None = None,
+) -> ProcessPoolExecutor | ThreadPoolExecutor:
     """Process pool needs a real __main__ file (not stdin); prefer fork on Linux."""
+    if memory_governor is not None and memory_governor.limits.enabled:
+        logger.info("Memory limits active: using thread pool for scan workers")
+        return ThreadPoolExecutor(max_workers=workers)
     if not use_process_pool or _main_script_path() is None:
         if use_process_pool:
             logger.debug("Process pool unavailable for this entrypoint; using threads")
@@ -112,9 +119,18 @@ class Indexer:
         batch_size = max(self.workers * 2, 8)
         batch: list[Path] = []
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
+        scan_workers = self.workers
+        if self._memory is not None and self._memory.limits.enabled:
+            scan_workers = self._memory.effective_scan_workers(self.workers)
+            if scan_workers < self.workers:
+                logger.info(
+                    "Scan parallelism reduced %d -> %d (memory limits)",
+                    self.workers,
+                    scan_workers,
+                )
 
         try:
-            pool = _create_scan_executor(self.workers, self._use_process_pool)
+            pool = _create_scan_executor(scan_workers, self._use_process_pool, self._memory)
             with self._executor_lock:
                 self._executor = pool
 
@@ -207,12 +223,16 @@ class Indexer:
                     file_bytes = path.stat().st_size
                 except OSError:
                     file_bytes = 0
-                if not self._memory.wait_for_job(file_bytes, self._stop, peak_factor=1.5):
+                if not self._memory.wait_for_job(
+                    file_bytes, self._stop, peak_factor=SCAN_JOB_PEAK_FACTOR
+                ):
                     return False
             pending[pool.submit(process_elf_path, str(path))] = path
             return True
 
-        for _ in range(min(self.workers, len(jobs))):
+        max_in_flight = min(len(jobs), getattr(pool, "_max_workers", self.workers))
+
+        for _ in range(max_in_flight):
             if not submit_next():
                 break
 

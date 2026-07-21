@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -12,6 +13,10 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 DEFAULT_DEDUP_PEAK_FACTOR = 3.0
+DEFAULT_DEDUP_PEAK_FACTOR_DECOMPRESS = 10.0
+DEFAULT_MAX_SYSTEM_RAM_USED_PCT = 75
+DEFAULT_MAX_RSS_RAM_PCT = 45
+SCAN_JOB_PEAK_FACTOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,8 @@ class MemoryLimits:
     min_mem_available_bytes: int = 0
     poll_interval_sec: float = 0.5
     dedup_peak_factor: float = DEFAULT_DEDUP_PEAK_FACTOR
+    dedup_peak_factor_decompress: float = DEFAULT_DEDUP_PEAK_FACTOR_DECOMPRESS
+    max_system_ram_used_bytes: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -38,6 +45,7 @@ class MemoryLimits:
             self.max_rss_bytes > 0
             or self.max_swap_bytes > 0
             or self.min_mem_available_bytes > 0
+            or self.max_system_ram_used_bytes > 0
         )
 
 
@@ -54,6 +62,74 @@ def _read_int_kb(path: str, key: str) -> int:
     except OSError:
         return 0
     return 0
+
+
+def read_mem_total_bytes() -> int:
+    """MemTotal from /proc/meminfo."""
+    return _read_int_kb("/proc/meminfo", "MemTotal:") * 1024
+
+
+def system_ram_used_bytes(usage: MemoryUsage) -> int:
+    total = read_mem_total_bytes()
+    if total <= 0:
+        return 0
+    return max(0, total - usage.mem_available_bytes)
+
+
+def dedup_peak_factor_for_strategy(strategy: str, limits: MemoryLimits) -> float:
+    """decompress-dwz/objcopy can spike far above on-disk file size."""
+    if "decompress" in strategy.lower() or strategy in {"xdelta-decompress-dwz", "decompress-dwz"}:
+        return max(limits.dedup_peak_factor, limits.dedup_peak_factor_decompress)
+    return limits.dedup_peak_factor
+
+
+def clamp_memory_limits(
+    max_rss_mb: int,
+    max_swap_mb: int,
+    min_available_mb: int,
+    dedup_peak_factor: float,
+    dedup_peak_factor_decompress: float,
+    max_system_ram_used_pct: int,
+) -> tuple[MemoryLimits, list[str]]:
+    """Cap user limits to a safe fraction of system RAM; return notes for logging."""
+    notes: list[str] = []
+    total = read_mem_total_bytes()
+    if total <= 0:
+        return (
+            MemoryLimits(
+                max_rss_bytes=mb_to_bytes(max_rss_mb),
+                max_swap_bytes=mb_to_bytes(max_swap_mb),
+                min_mem_available_bytes=mb_to_bytes(min_available_mb),
+                dedup_peak_factor=dedup_peak_factor,
+                dedup_peak_factor_decompress=dedup_peak_factor_decompress,
+                max_system_ram_used_bytes=0,
+            ),
+            notes,
+        )
+
+    total_mb = total // (1024 * 1024)
+    cap_rss_mb = max(512, int(total_mb * DEFAULT_MAX_RSS_RAM_PCT / 100))
+    effective_rss_mb = max_rss_mb
+    if max_rss_mb <= 0:
+        effective_rss_mb = 0
+    elif max_rss_mb > cap_rss_mb:
+        notes.append(f"max_rss capped {max_rss_mb} -> {cap_rss_mb} MiB ({DEFAULT_MAX_RSS_RAM_PCT}% of {total_mb} MiB RAM)")
+        effective_rss_mb = cap_rss_mb
+
+    pct = max_system_ram_used_pct if max_system_ram_used_pct > 0 else DEFAULT_MAX_SYSTEM_RAM_USED_PCT
+    max_system_used = int(total * pct / 100) if pct > 0 else 0
+
+    limits = MemoryLimits(
+        max_rss_bytes=mb_to_bytes(effective_rss_mb),
+        max_swap_bytes=mb_to_bytes(max_swap_mb),
+        min_mem_available_bytes=mb_to_bytes(min_available_mb),
+        dedup_peak_factor=dedup_peak_factor,
+        dedup_peak_factor_decompress=dedup_peak_factor_decompress,
+        max_system_ram_used_bytes=max_system_used,
+    )
+    if max_system_used > 0:
+        notes.append(f"system RAM throttle at {pct}% ({max_system_used // (1024 * 1024)} MiB used)")
+    return limits, notes
 
 
 def read_mem_available_bytes() -> int:
@@ -204,6 +280,10 @@ class MemoryGovernor:
 
     def _over_limit(self, usage: MemoryUsage) -> str | None:
         limits = self.limits
+        if limits.max_system_ram_used_bytes > 0:
+            used = system_ram_used_bytes(usage)
+            if used >= limits.max_system_ram_used_bytes:
+                return "system_ram"
         if limits.max_rss_bytes > 0 and usage.rss_bytes >= limits.max_rss_bytes:
             return "rss"
         if limits.max_swap_bytes > 0:
@@ -303,7 +383,13 @@ class MemoryGovernor:
             self._log_pressure(reason or "job_budget", usage, peak_bytes=peak)
             self._sleep(self.limits.poll_interval_sec)
 
-    def effective_workers(self, max_workers: int, largest_file_bytes: int) -> int:
+    def effective_workers(
+        self,
+        max_workers: int,
+        largest_file_bytes: int,
+        *,
+        peak_factor: float | None = None,
+    ) -> int:
         """Reduce parallelism when large files would exceed available RAM."""
         workers = max(1, max_workers)
         if not self.limits.enabled or largest_file_bytes <= 0:
@@ -317,10 +403,25 @@ class MemoryGovernor:
         if headroom <= 0:
             return 1
 
-        per_job = estimate_dedup_peak_bytes(largest_file_bytes, self.limits.dedup_peak_factor)
+        factor = peak_factor if peak_factor is not None else self.limits.dedup_peak_factor
+        per_job = estimate_dedup_peak_bytes(largest_file_bytes, factor)
         if per_job <= 0:
             return workers
         return max(1, min(workers, headroom // per_job))
+
+    def effective_scan_workers(self, max_workers: int) -> int:
+        """Conservative scan parallelism when memory limits are active."""
+        workers = max(1, max_workers)
+        if not self.limits.enabled:
+            return workers
+        usage = process_tree_usage(self.root_pid)
+        headroom = usage.mem_available_bytes
+        if self.limits.min_mem_available_bytes > 0:
+            headroom -= self.limits.min_mem_available_bytes
+        if headroom <= 0:
+            return 1
+        per_worker = 256 * 1024 * 1024
+        return max(1, min(workers, headroom // per_worker))
 
     def _release_budget(self, peak_bytes: int) -> None:
         with self._lock:
@@ -341,16 +442,51 @@ class MemoryGovernor:
             self._last_warn = now
             extra = f" need~={peak_bytes / (1024 * 1024):.1f} MiB" if peak_bytes else ""
             swap_delta = self.system_swap_delta_bytes(usage)
+            sys_used = system_ram_used_bytes(usage)
             logger.warning(
                 "Memory pressure (%s%s): rss=%.1f MiB tree_swap=%.1f MiB "
-                "sys_swap_delta=%.1f MiB (baseline=%.1f MiB) mem_available=%.1f MiB "
+                "sys_swap_delta=%.1f MiB sys_ram_used=%.1f MiB mem_available=%.1f MiB "
                 "reserved=%.1f MiB — throttling",
                 reason,
                 extra,
                 usage.rss_bytes / (1024 * 1024),
                 usage.swap_bytes / (1024 * 1024),
                 swap_delta / (1024 * 1024),
-                self._baseline_system_swap / (1024 * 1024),
+                sys_used / (1024 * 1024),
                 usage.mem_available_bytes / (1024 * 1024),
                 self._reserved_bytes / (1024 * 1024),
             )
+
+
+def run_subprocess_monitored(
+    cmd: list[str],
+    *,
+    memory_governor: MemoryGovernor | None = None,
+    stop_event: object | None = None,
+    poll_interval_sec: float = 0.25,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a subprocess; abort if memory limits are exceeded while it runs."""
+    import subprocess
+
+    if memory_governor is None or not memory_governor.limits.enabled:
+        return subprocess.run(cmd, capture_output=True, check=False)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        while proc.poll() is None:
+            if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+                proc.terminate()
+                proc.wait(timeout=10)
+                raise RuntimeError("stopped during subprocess")
+            if memory_governor._over_limit(memory_governor.snapshot()) is not None:
+                proc.terminate()
+                proc.wait(timeout=10)
+                raise RuntimeError("memory limit exceeded during subprocess")
+            time.sleep(poll_interval_sec)
+        stdout, stderr = proc.communicate(timeout=30)
+        return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout, stderr)
+    except Exception:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        raise

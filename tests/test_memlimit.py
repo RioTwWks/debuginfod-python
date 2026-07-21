@@ -167,8 +167,8 @@ def test_effective_workers_reduces_for_large_files() -> None:
     )
     try:
         # 6 MiB headroom after min_available, 3 MiB per 1 MiB file -> 2 workers max
-        assert governor.effective_workers(8, 1024 * 1024) == 2
-        assert governor.effective_workers(8, 10 * 1024 * 1024) == 1
+        assert governor.effective_workers(8, 1024 * 1024, peak_factor=3.0) == 2
+        assert governor.effective_workers(8, 10 * 1024 * 1024, peak_factor=3.0) == 1
     finally:
         memlimit.process_tree_usage = original
 

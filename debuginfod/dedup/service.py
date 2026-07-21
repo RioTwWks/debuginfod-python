@@ -12,7 +12,7 @@ from debuginfod.dedup.pipeline import BackfillResult, PipelineOptions, run_inges
 from debuginfod.dedup.preprocess import ObjcopyZstd, resolve_preprocessor
 from debuginfod.dedup.restore import RestoreOptions, restore_to_cache
 from debuginfod.dedup.xdelta import Xdelta
-from debuginfod.memlimit import MemoryGovernor
+from debuginfod.memlimit import MemoryGovernor, dedup_peak_factor_for_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,8 @@ class DedupConfig:
     xdelta_path: str = "xdelta3"
     dwz_path: str = "dwz"
     objcopy_path: str = "objcopy"
+    dedup_peak_factor: float = 3.0
+    dedup_serial_above_mb: int = 64
 
 
 class DedupService:
@@ -54,6 +56,12 @@ class DedupService:
         return self.cfg.enabled
 
     def _pipeline_opts(self, dry_run: bool = False, stop_event: object | None = None) -> PipelineOptions:
+        peak_factor = self.cfg.dedup_peak_factor
+        if self._memory_governor is not None:
+            peak_factor = dedup_peak_factor_for_strategy(
+                self.cfg.strategy,
+                self._memory_governor.limits,
+            )
         return PipelineOptions(
             db=self.db,
             scan_paths=self.scan_paths,
@@ -66,6 +74,9 @@ class DedupService:
             dry_run=dry_run,
             memory_governor=self._memory_governor,
             stop_event=stop_event,
+            dedup_strategy=self.cfg.strategy,
+            dedup_peak_factor=peak_factor,
+            dedup_serial_above_mb=self.cfg.dedup_serial_above_mb,
         )
 
     def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str:

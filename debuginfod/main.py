@@ -16,7 +16,7 @@ from debuginfod.database_factory import open_database
 from debuginfod.dedup.scan_hook import DedupScanHook
 from debuginfod.dedup.service import DedupConfig, DedupService
 from debuginfod.indexer import Indexer
-from debuginfod.memlimit import MemoryGovernor, MemoryLimits, mb_to_bytes
+from debuginfod.memlimit import MemoryGovernor, clamp_memory_limits
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
 from debuginfod.shutdown import install_scan_shutdown_handlers
@@ -30,14 +30,16 @@ def _setup_logging(level: str) -> None:
     )
 
 
-def _build_memory_governor(settings: object) -> MemoryGovernor:
-    limits = MemoryLimits(
-        max_rss_bytes=mb_to_bytes(getattr(settings, "memory_max_ram_mb", 0)),
-        max_swap_bytes=mb_to_bytes(getattr(settings, "memory_max_swap_mb", 0)),
-        min_mem_available_bytes=mb_to_bytes(getattr(settings, "memory_min_available_mb", 0)),
-        dedup_peak_factor=getattr(settings, "memory_dedup_peak_factor", 3.0),
+def _build_memory_governor(settings: object) -> tuple[MemoryGovernor, list[str]]:
+    limits, notes = clamp_memory_limits(
+        getattr(settings, "memory_max_ram_mb", 0),
+        getattr(settings, "memory_max_swap_mb", 0),
+        getattr(settings, "memory_min_available_mb", 0),
+        getattr(settings, "memory_dedup_peak_factor", 3.0),
+        getattr(settings, "memory_dedup_peak_factor_decompress", 10.0),
+        getattr(settings, "memory_max_system_ram_pct", 75),
     )
-    return MemoryGovernor(limits)
+    return MemoryGovernor(limits), notes
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -50,7 +52,9 @@ def main(argv: list[str] | None = None) -> None:
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["DEBUGINFOD_SCAN_DWARF_MAX_MB"] = str(settings.scan_dwarf_max_mb)
 
-    memory_governor = _build_memory_governor(settings)
+    memory_governor, limit_notes = _build_memory_governor(settings)
+    for note in limit_notes:
+        logger.info("Memory limit adjust: %s", note)
     db = open_database(settings)
     dedup_cfg = DedupConfig(
         enabled=settings.dedup_enabled,
@@ -61,6 +65,8 @@ def main(argv: list[str] | None = None) -> None:
         xdelta_path=settings.xdelta3_path,
         dwz_path=settings.dwz_path,
         objcopy_path=settings.objcopy_path,
+        dedup_peak_factor=settings.memory_dedup_peak_factor,
+        dedup_serial_above_mb=settings.memory_dedup_serial_above_mb,
     )
     dedup_service: DedupService | None = None
     dedup_hook: DedupScanHook | None = None
@@ -80,14 +86,17 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if memory_governor.limits.enabled:
+        eff_rss = memory_governor.limits.max_rss_bytes // (1024 * 1024)
         logger.info(
-            "Memory limits: max_rss=%d MiB max_swap=%d MiB (tree + delta since start) "
-            "min_available=%d MiB dedup_peak=%.1fx dwarf_max=%d MiB; "
-            "system swap baseline=%.1f MiB",
-            settings.memory_max_ram_mb,
+            "Memory limits: effective_max_rss=%d MiB max_swap=%d MiB (tree+delta) "
+            "min_available=%d MiB dedup_peak=%.1fx decompress_peak=%.1fx "
+            "serial_above=%d MiB dwarf_max=%d MiB; swap baseline=%.1f MiB",
+            eff_rss,
             settings.memory_max_swap_mb,
             settings.memory_min_available_mb,
             settings.memory_dedup_peak_factor,
+            settings.memory_dedup_peak_factor_decompress,
+            settings.memory_dedup_serial_above_mb,
             settings.scan_dwarf_max_mb,
             memory_governor.baseline_system_swap_bytes / (1024 * 1024),
         )
@@ -98,9 +107,11 @@ def main(argv: list[str] | None = None) -> None:
             settings.scan_dwarf_max_mb,
         )
 
+    scan_mode = "thread pool (memory limits)" if memory_governor.limits.enabled else "process pool"
     logger.info(
-        "Scan workers=%d (process pool, max_tasks_per_child=1); dedup workers=%d",
+        "Scan workers=%d (%s); dedup workers=%d",
         settings.scan_workers,
+        scan_mode,
         settings.dedup_workers if dedup_cfg.enabled else 0,
     )
 
