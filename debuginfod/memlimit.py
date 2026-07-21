@@ -140,29 +140,15 @@ def estimate_dedup_peak_bytes(file_bytes: int, peak_factor: float) -> int:
     return max(file_bytes, int(file_bytes * max(1.0, peak_factor)))
 
 
-def _over_limit(usage: MemoryUsage, limits: MemoryLimits) -> str | None:
-    if limits.max_rss_bytes > 0 and usage.rss_bytes >= limits.max_rss_bytes:
-        return "rss"
-    if limits.max_swap_bytes > 0:
-        swap_used = max(usage.swap_bytes, usage.system_swap_bytes)
-        if swap_used >= limits.max_swap_bytes:
-            return "swap"
-    if (
-        limits.min_mem_available_bytes > 0
-        and usage.mem_available_bytes < limits.min_mem_available_bytes
-    ):
-        return "mem_available"
-    return None
-
-
 def _has_job_headroom(
+    governor: MemoryGovernor,
     usage: MemoryUsage,
-    limits: MemoryLimits,
     peak_bytes: int,
     reserved_bytes: int,
 ) -> bool:
-    if _over_limit(usage, limits) is not None:
+    if governor._over_limit(usage) is not None:
         return False
+    limits = governor.limits
     if peak_bytes <= 0:
         return True
     need = peak_bytes + reserved_bytes
@@ -194,6 +180,7 @@ class MemoryGovernor:
         *,
         root_pid: int | None = None,
         sleeper: Callable[[float], None] | None = None,
+        baseline_system_swap_bytes: int | None = None,
     ) -> None:
         self.limits = limits
         self.root_pid = root_pid
@@ -201,6 +188,36 @@ class MemoryGovernor:
         self._last_warn = 0.0
         self._lock = threading.Lock()
         self._reserved_bytes = 0
+        self._baseline_system_swap = (
+            read_system_swap_used_bytes()
+            if baseline_system_swap_bytes is None
+            else max(0, baseline_system_swap_bytes)
+        )
+
+    @property
+    def baseline_system_swap_bytes(self) -> int:
+        return self._baseline_system_swap
+
+    def system_swap_delta_bytes(self, usage: MemoryUsage) -> int:
+        """Swap growth since governor start (ignores pre-existing system swap)."""
+        return max(0, usage.system_swap_bytes - self._baseline_system_swap)
+
+    def _over_limit(self, usage: MemoryUsage) -> str | None:
+        limits = self.limits
+        if limits.max_rss_bytes > 0 and usage.rss_bytes >= limits.max_rss_bytes:
+            return "rss"
+        if limits.max_swap_bytes > 0:
+            if usage.swap_bytes >= limits.max_swap_bytes:
+                return "tree_swap"
+            delta = self.system_swap_delta_bytes(usage)
+            if delta >= limits.max_swap_bytes:
+                return "swap_delta"
+        if (
+            limits.min_mem_available_bytes > 0
+            and usage.mem_available_bytes < limits.min_mem_available_bytes
+        ):
+            return "mem_available"
+        return None
 
     def wait_for_headroom(self, stop_event: object | None = None) -> bool:
         """Block until under limits. Returns False if stop_event is set."""
@@ -212,7 +229,7 @@ class MemoryGovernor:
                 return False
 
             usage = process_tree_usage(self.root_pid)
-            reason = _over_limit(usage, self.limits)
+            reason = self._over_limit(usage)
             if reason is None:
                 return True
 
@@ -240,9 +257,12 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = _over_limit(usage, self.limits)
+                reason = self._over_limit(usage)
                 if reason is None and _has_job_headroom(
-                    usage, self.limits, peak, self._reserved_bytes
+                    self,
+                    usage,
+                    peak,
+                    self._reserved_bytes,
                 ):
                     return True
 
@@ -270,9 +290,12 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = _over_limit(usage, self.limits)
+                reason = self._over_limit(usage)
                 if reason is None and _has_job_headroom(
-                    usage, self.limits, peak, self._reserved_bytes
+                    self,
+                    usage,
+                    peak,
+                    self._reserved_bytes,
                 ):
                     self._reserved_bytes += peak
                     return JobBudget(self, peak)
@@ -317,14 +340,17 @@ class MemoryGovernor:
         if now - self._last_warn >= 5.0:
             self._last_warn = now
             extra = f" need~={peak_bytes / (1024 * 1024):.1f} MiB" if peak_bytes else ""
+            swap_delta = self.system_swap_delta_bytes(usage)
             logger.warning(
                 "Memory pressure (%s%s): rss=%.1f MiB tree_swap=%.1f MiB "
-                "sys_swap=%.1f MiB mem_available=%.1f MiB reserved=%.1f MiB — throttling",
+                "sys_swap_delta=%.1f MiB (baseline=%.1f MiB) mem_available=%.1f MiB "
+                "reserved=%.1f MiB — throttling",
                 reason,
                 extra,
                 usage.rss_bytes / (1024 * 1024),
                 usage.swap_bytes / (1024 * 1024),
-                usage.system_swap_bytes / (1024 * 1024),
+                swap_delta / (1024 * 1024),
+                self._baseline_system_swap / (1024 * 1024),
                 usage.mem_available_bytes / (1024 * 1024),
                 self._reserved_bytes / (1024 * 1024),
             )

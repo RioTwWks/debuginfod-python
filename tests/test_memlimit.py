@@ -50,7 +50,11 @@ def test_over_limit_rss() -> None:
 
 def test_over_limit_system_swap() -> None:
     limits = MemoryLimits(max_swap_bytes=100)
-    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    governor = MemoryGovernor(
+        limits,
+        sleeper=lambda _: None,
+        baseline_system_swap_bytes=0,
+    )
 
     class _Stop:
         def is_set(self) -> bool:
@@ -82,6 +86,24 @@ def test_over_limit_system_swap() -> None:
         assert governor.wait_for_headroom(_Stop()) is True
     finally:
         memlimit.process_tree_usage = original
+
+
+def test_preexisting_system_swap_does_not_block() -> None:
+    limits = MemoryLimits(max_swap_bytes=100)
+    baseline = 4000 * 1024 * 1024
+    governor = MemoryGovernor(
+        limits,
+        sleeper=lambda _: None,
+        baseline_system_swap_bytes=baseline,
+    )
+    usage = MemoryUsage(
+        rss_bytes=0,
+        swap_bytes=0,
+        mem_available_bytes=10**9,
+        system_swap_bytes=baseline,
+    )
+    assert governor._over_limit(usage) is None
+    assert governor.system_swap_delta_bytes(usage) == 0
 
 
 def test_wait_for_job_requires_headroom() -> None:
