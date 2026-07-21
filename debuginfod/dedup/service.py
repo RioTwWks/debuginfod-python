@@ -12,6 +12,7 @@ from debuginfod.dedup.pipeline import BackfillResult, PipelineOptions, run_inges
 from debuginfod.dedup.preprocess import ObjcopyZstd, resolve_preprocessor
 from debuginfod.dedup.restore import RestoreOptions, restore_to_cache
 from debuginfod.dedup.xdelta import Xdelta
+from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,17 @@ class DedupConfig:
 
 
 class DedupService:
-    def __init__(self, db: Database, cfg: DedupConfig, scan_paths: list[str | Path]) -> None:
+    def __init__(
+        self,
+        db: Database,
+        cfg: DedupConfig,
+        scan_paths: list[str | Path],
+        memory_governor: MemoryGovernor | None = None,
+    ) -> None:
         self.db = db
         self.cfg = cfg
         self.scan_paths = [str(p) for p in scan_paths]
+        self._memory_governor = memory_governor
         self._xdelta = Xdelta(cfg.xdelta_path)
         self._preprocessor = resolve_preprocessor(cfg.strategy, cfg.dwz_path, cfg.objcopy_path)
         self._objcopy_zstd = ObjcopyZstd(cfg.objcopy_path)
@@ -45,7 +53,7 @@ class DedupService:
     def enabled(self) -> bool:
         return self.cfg.enabled
 
-    def _pipeline_opts(self, dry_run: bool = False) -> PipelineOptions:
+    def _pipeline_opts(self, dry_run: bool = False, stop_event: object | None = None) -> PipelineOptions:
         return PipelineOptions(
             db=self.db,
             scan_paths=self.scan_paths,
@@ -56,14 +64,16 @@ class DedupService:
             projects=self.cfg.projects,
             workers=self.cfg.workers,
             dry_run=dry_run,
+            memory_governor=self._memory_governor,
+            stop_event=stop_event,
         )
 
     def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str:
         return restore_to_cache(self.db, self._restore_opts, cache_dir, file_path)
 
-    def run_ingest_after_scan(self) -> BackfillResult:
+    def run_ingest_after_scan(self, stop_event: object | None = None) -> BackfillResult:
         started = datetime.now(timezone.utc)
-        result = run_ingest_all(self._pipeline_opts())
+        result = run_ingest_all(self._pipeline_opts(stop_event=stop_event))
         self._record_run(started, result)
         logger.info(
             "dedup ingest: registered=%d compressed=%d errors=%d bytes_before=%d bytes_after=%d",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -13,6 +13,7 @@ from typing import Iterator
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.index_worker import IndexWorkerResult, process_elf_path
+from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class Indexer:
         dedup_hook: object | None = None,
         stop_event: threading.Event | None = None,
         use_process_pool: bool = True,
+        memory_governor: MemoryGovernor | None = None,
     ) -> None:
         self.db = db
         self.scan_paths = [p.resolve() for p in scan_paths]
@@ -48,6 +50,7 @@ class Indexer:
         self.dedup_hook = dedup_hook
         self._stop = stop_event or threading.Event()
         self._use_process_pool = use_process_pool
+        self._memory = memory_governor
         self._executor: ProcessPoolExecutor | ThreadPoolExecutor | None = None
         self._executor_lock = threading.Lock()
 
@@ -67,13 +70,16 @@ class Indexer:
             stats.cancelled = True
             return stats
 
-        batch_size = max(self.workers * 8, 32)
+        batch_size = max(self.workers * 2, 8)
         batch: list[Path] = []
         pool_cls = ProcessPoolExecutor if self._use_process_pool else ThreadPoolExecutor
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
 
         try:
-            pool = pool_cls(max_workers=self.workers)
+            pool_kwargs: dict[str, object] = {"max_workers": self.workers}
+            if self._use_process_pool:
+                pool_kwargs["max_tasks_per_child"] = 1
+            pool = pool_cls(**pool_kwargs)  # type: ignore[arg-type]
             with self._executor_lock:
                 self._executor = pool
 
@@ -98,7 +104,7 @@ class Indexer:
 
             if self.dedup_hook is not None and not self._stop.is_set():
                 try:
-                    self.dedup_hook.run_ingest_after_scan()
+                    self.dedup_hook.run_ingest_after_scan(stop_event=self._stop)
                     dedup = self.db.dedup_stats()
                     stats.dedup_files_registered = int(dedup.get("total_files", 0))
                     stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
@@ -151,25 +157,41 @@ class Indexer:
         if not jobs or self._stop.is_set():
             return
 
-        futures: dict[Future[IndexWorkerResult], Path] = {
-            pool.submit(process_elf_path, str(path)): path for path in jobs
-        }
-        try:
-            for future in as_completed(futures):
-                if self._stop.is_set():
-                    for pending in futures:
-                        pending.cancel()
-                    break
-                path = futures[future]
+        pending: dict[Future[IndexWorkerResult], Path] = {}
+        job_iter = iter(jobs)
+
+        def submit_next() -> bool:
+            if self._stop.is_set():
+                return False
+            try:
+                path = next(job_iter)
+            except StopIteration:
+                return False
+            if self._memory is not None and not self._memory.wait_for_headroom(self._stop):
+                return False
+            pending[pool.submit(process_elf_path, str(path))] = path
+            return True
+
+        for _ in range(min(self.workers, len(jobs))):
+            if not submit_next():
+                break
+
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                path = pending.pop(future)
                 try:
                     result = future.result()
                     self._apply_worker_result(path, result, stats)
                 except Exception:
                     stats.errors += 1
                     logger.exception("Failed to index %s", path)
-        finally:
-            for pending in futures:
-                pending.cancel()
+                if self._stop.is_set():
+                    for other in pending:
+                        other.cancel()
+                    pending.clear()
+                    break
+                submit_next()
 
     def _apply_worker_result(self, path: Path, result: IndexWorkerResult, stats: ScanStats) -> None:
         if result.error:

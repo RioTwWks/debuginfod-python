@@ -38,6 +38,10 @@ class Settings:
     dedup_strategy: str = "xdelta-decompress-dwz"
     dedup_compress_base: bool = True
     database_url: str = ""
+    memory_max_ram_mb: int = 0
+    memory_max_swap_mb: int = 0
+    memory_min_available_mb: int = 512
+    scan_dwarf_max_mb: int = 128
     # legacy blob settings (kept for compatibility, unused in Go-parity mode)
     blob_dir: Path = Path(".debuginfod-blobs")
     reconstruct_cache_dir: Path = Path(".debuginfod-reconstruct-cache")
@@ -115,6 +119,10 @@ def load_settings(env_file: str | None = None) -> Settings:
         dedup_strategy=os.getenv("DEBUGINFOD_DEDUP_STRATEGY", "xdelta-decompress-dwz"),
         dedup_compress_base=_env_bool("DEBUGINFOD_DEDUP_COMPRESS_BASE", True),
         database_url=os.getenv("DEBUGINFOD_DATABASE_URL", ""),
+        memory_max_ram_mb=_env_int("DEBUGINFOD_MEMORY_MAX_RAM_MB", 0),
+        memory_max_swap_mb=_env_int("DEBUGINFOD_MEMORY_MAX_SWAP_MB", 0),
+        memory_min_available_mb=_env_int("DEBUGINFOD_MEMORY_MIN_AVAILABLE_MB", 512),
+        scan_dwarf_max_mb=_env_int("DEBUGINFOD_SCAN_DWARF_MAX_MB", 128),
         blob_dir=Path(os.getenv("DEBUGINFOD_BLOB_DIR", ".debuginfod-blobs")),
         reconstruct_cache_dir=cache_dir,
         delta_min_ratio=_env_float("DEBUGINFOD_DELTA_MIN_RATIO", 0.85),
