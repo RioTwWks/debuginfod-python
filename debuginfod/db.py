@@ -203,6 +203,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             """
         )
         self._ensure_artifact_columns()
+        self._ensure_source_columns()
         self._migrate_scan_history()
         self._migrate_dedup()
         self._conn.commit()
@@ -235,6 +236,19 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         for column, typedef in additions.items():
             if column not in existing:
                 self._execute(f"ALTER TABLE artifacts ADD COLUMN {column} {typedef}")
+
+    def _ensure_source_columns(self) -> None:
+        if self._dialect == "postgresql":
+            return
+        rows = self._execute("PRAGMA table_info(sources)").fetchall()
+        existing = {row[1] for row in rows}
+        additions = {
+            "archive_path": "TEXT NOT NULL DEFAULT ''",
+            "member_path": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, typedef in additions.items():
+            if column not in existing:
+                self._execute(f"ALTER TABLE sources ADD COLUMN {column} {typedef}")
 
     def close(self) -> None:
         self._conn.close()
@@ -523,6 +537,89 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             )
             for row in rows
         ]
+
+    def list_artifact_records(self) -> list[ArtifactRecord]:
+        rows = self._execute(
+            """
+            SELECT build_id, type, file_path, archive_path, member_path,
+                   build_id_kind, raw_build_id, mtime_ns
+            FROM artifacts
+            ORDER BY file_path, type
+            """
+        ).fetchall()
+        out: list[ArtifactRecord] = []
+        for row in rows:
+            out.append(
+                ArtifactRecord(
+                    build_id=row["build_id"],
+                    artifact_type=row["type"],
+                    file_path=row["file_path"] or "",
+                    archive_path=row["archive_path"] or "",
+                    member_path=row["member_path"] or "",
+                    build_id_kind=row["build_id_kind"] or "gnu",
+                    raw_build_id=row["raw_build_id"] or "",
+                    mtime_ns=int(row["mtime_ns"] or 0),
+                )
+            )
+        return out
+
+    def artifact_mtime_map(self) -> dict[tuple[str, str], int]:
+        rows = self._execute(
+            "SELECT build_id, type, mtime_ns FROM artifacts"
+        ).fetchall()
+        return {(row["build_id"], row["type"]): int(row["mtime_ns"] or 0) for row in rows}
+
+    def list_sources_for_buildid_ui(
+        self,
+        build_id: str,
+        scan_roots: list[Path],
+        limit: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        from datetime import datetime, timezone
+
+        from debuginfod.webui.search import relative_to_scan_roots
+
+        total = self._execute(
+            "SELECT COUNT(*) FROM sources WHERE build_id = ?",
+            (build_id,),
+        ).fetchone()[0]
+        rows = self._execute(
+            """
+            SELECT source_path, file_path, archive_path, member_path, mtime_ns
+            FROM sources
+            WHERE build_id = ?
+            ORDER BY source_path
+            LIMIT ?
+            """,
+            (build_id, max(1, min(limit, 200))),
+        ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            file_path = (row["file_path"] or "").replace("\\", "/")
+            source_path = (row["source_path"] or "").replace("\\", "/")
+            archive_path = (row["archive_path"] or "").replace("\\", "/")
+            member_path = (row["member_path"] or "").replace("\\", "/")
+            mtime_ns = int(row["mtime_ns"] or 0)
+            payload: dict[str, Any] = {
+                "source_path": source_path,
+                "file_path": file_path,
+            }
+            if archive_path:
+                payload["archive_path"] = archive_path
+                payload["member_path"] = member_path
+                payload["archive_rel"] = relative_to_scan_roots(archive_path, scan_roots)
+                payload["relative_path"] = f"{payload['archive_rel']} → {member_path}"
+            else:
+                payload["relative_path"] = relative_to_scan_roots(file_path, scan_roots)
+            if mtime_ns > 0:
+                payload["mtime_ns"] = mtime_ns
+                payload["mtime"] = datetime.fromtimestamp(
+                    mtime_ns / 1_000_000_000,
+                    tz=timezone.utc,
+                ).isoformat()
+            out.append(payload)
+        return out, int(total)
 
     def search_metadata_ui(
         self,

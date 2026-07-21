@@ -16,6 +16,13 @@ from starlette.staticfiles import StaticFiles
 from debuginfod.benchmark import discover_binaries, resolve_testdata_path, run_benchmark
 from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.db import Database, MetadataResult
+from debuginfod.webui.search import (
+    enrich_flat_results,
+    metadata_to_ui_row,
+    search_buildid_grouped,
+    search_name_for_ui,
+    search_path_for_ui,
+)
 from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -250,16 +257,67 @@ def register_webui(
         limit: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
         mode = key.lower().strip() or "buildid"
+        roots = scan_paths or []
 
         if mode == "buildid":
-            results = db.search_buildid_for_ui(q, limit)
+            grouped = await asyncio.to_thread(
+                search_buildid_grouped,
+                db,
+                q,
+                limit,
+                roots,
+            )
             return {
                 "key": mode,
                 "query": q,
-                "results": [_artifact_to_dict(r) for r in results],
-                "count": len(results),
+                "grouped": grouped,
+                "count": len(grouped),
                 "complete": True,
             }
+
+        if mode == "path":
+            search_value = (value or q).strip()
+            results, complete, next_offset = await asyncio.to_thread(
+                search_path_for_ui,
+                db,
+                roots,
+                search_value,
+                offset,
+                limit,
+            )
+            payload: dict[str, Any] = {
+                "key": mode,
+                "value": search_value,
+                "results": results,
+                "count": len(results),
+                "complete": complete,
+            }
+            if not complete:
+                payload["next_offset"] = next_offset
+            return payload
+
+        if mode == "name":
+            search_value = (value or q).strip()
+            if not search_value:
+                raise HTTPException(status_code=400, detail="value required for name search")
+            results, complete, next_offset = await asyncio.to_thread(
+                search_name_for_ui,
+                db,
+                roots,
+                search_value,
+                offset,
+                limit,
+            )
+            payload = {
+                "key": mode,
+                "value": search_value,
+                "results": results,
+                "count": len(results),
+                "complete": complete,
+            }
+            if not complete:
+                payload["next_offset"] = next_offset
+            return payload
 
         if mode in {"glob", "file"}:
             search_value = (value or q).strip()
@@ -271,11 +329,20 @@ def register_webui(
                 offset=offset,
                 limit=limit,
             )
-            payload: dict[str, Any] = {
+            enriched = await asyncio.to_thread(
+                enrich_flat_results,
+                db,
+                [
+                    metadata_to_ui_row(record)
+                    for record in results
+                ],
+                roots,
+            )
+            payload = {
                 "key": mode,
                 "value": search_value,
-                "results": [_artifact_to_dict(r) for r in results],
-                "count": len(results),
+                "results": enriched,
+                "count": len(enriched),
                 "complete": complete,
             }
             if not complete:
