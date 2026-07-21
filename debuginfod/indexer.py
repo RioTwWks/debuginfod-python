@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from elftools.elf.elffile import ELFFile
 
@@ -46,12 +47,18 @@ class Indexer:
         self.workers = max(1, workers)
         self.dedup_hook = dedup_hook
         self._stop = stop_event or threading.Event()
+        self._executor: ThreadPoolExecutor | None = None
+        self._executor_lock = threading.Lock()
 
     def bind_stop_event(self, stop_event: threading.Event) -> None:
         self._stop = stop_event
 
     def request_stop(self) -> None:
         self._stop.set()
+        with self._executor_lock:
+            pool = self._executor
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def scan(self) -> ScanStats:
         stats = ScanStats()
@@ -59,67 +66,29 @@ class Indexer:
             stats.cancelled = True
             return stats
 
-        jobs: list[Path] = []
-        for root in self.scan_paths:
+        batch_size = max(self.workers * 8, 32)
+        batch: list[Path] = []
+
+        for path in self._iter_elf_jobs(stats):
             if self._stop.is_set():
                 stats.cancelled = True
                 return stats
-            if not root.exists():
-                logger.warning("Scan path does not exist: %s", root)
-                continue
-            if root.is_file():
-                if buildid.is_elf(root):
-                    stats.files_seen += 1
-                    if self._should_scan(root):
-                        jobs.append(root.resolve())
-                    else:
-                        stats.files_skipped += 1
-                continue
-            for dirpath, _dirnames, filenames in os.walk(root):
+            batch.append(path)
+            if len(batch) >= batch_size:
+                self._index_batch(batch, stats)
+                batch.clear()
                 if self._stop.is_set():
                     stats.cancelled = True
-                    break
-                for name in filenames:
-                    path = Path(dirpath) / name
-                    stats.files_seen += 1
-                    if not buildid.is_elf(path):
-                        continue
-                    if not self._should_scan(path):
-                        stats.files_skipped += 1
-                        continue
-                    jobs.append(path.resolve())
-            if stats.cancelled:
-                break
+                    return stats
 
-        if jobs and not self._stop.is_set():
-            pool = ThreadPoolExecutor(max_workers=self.workers)
-            futures = {pool.submit(self._index_elf_file, path): path for path in jobs}
-            try:
-                for future in as_completed(futures):
-                    if self._stop.is_set():
-                        stats.cancelled = True
-                        for pending in futures:
-                            pending.cancel()
-                        break
-                    path = futures[future]
-                    try:
-                        indexed = future.result()
-                        if indexed:
-                            stats.files_indexed += 1
-                            stats.artifacts_added += 1
-                        else:
-                            stats.files_skipped += 1
-                    except Exception:
-                        stats.errors += 1
-                        logger.exception("Failed to index %s", path)
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
+        if batch and not self._stop.is_set():
+            self._index_batch(batch, stats)
 
         if self._stop.is_set():
             stats.cancelled = True
             return stats
 
-        if self.dedup_hook is not None:
+        if self.dedup_hook is not None and not self._stop.is_set():
             try:
                 self.dedup_hook.run_ingest_after_scan()
                 dedup = self.db.dedup_stats()
@@ -130,6 +99,67 @@ class Indexer:
                 logger.exception("Dedup ingest after scan failed")
 
         return stats
+
+    def _iter_elf_jobs(self, stats: ScanStats) -> Iterator[Path]:
+        for root in self.scan_paths:
+            if self._stop.is_set():
+                return
+            if not root.exists():
+                logger.warning("Scan path does not exist: %s", root)
+                continue
+            if root.is_file():
+                if buildid.is_elf(root):
+                    stats.files_seen += 1
+                    if self._should_scan(root):
+                        yield root.resolve()
+                    else:
+                        stats.files_skipped += 1
+                continue
+            for dirpath, _dirnames, filenames in os.walk(root):
+                if self._stop.is_set():
+                    return
+                for name in filenames:
+                    path = Path(dirpath) / name
+                    stats.files_seen += 1
+                    if not buildid.is_elf(path):
+                        continue
+                    if not self._should_scan(path):
+                        stats.files_skipped += 1
+                        continue
+                    yield path.resolve()
+
+    def _index_batch(self, jobs: list[Path], stats: ScanStats) -> None:
+        if not jobs or self._stop.is_set():
+            return
+
+        pool = ThreadPoolExecutor(max_workers=self.workers)
+        with self._executor_lock:
+            self._executor = pool
+        futures: dict[Future[bool], Path] = {
+            pool.submit(self._index_elf_file, path): path for path in jobs
+        }
+        try:
+            for future in as_completed(futures):
+                if self._stop.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                path = futures[future]
+                try:
+                    indexed = future.result()
+                    if indexed:
+                        stats.files_indexed += 1
+                        stats.artifacts_added += 1
+                    else:
+                        stats.files_skipped += 1
+                except Exception:
+                    stats.errors += 1
+                    logger.exception("Failed to index %s", path)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+            with self._executor_lock:
+                if self._executor is pool:
+                    self._executor = None
 
     def _should_scan(self, path: Path) -> bool:
         if self._stop.is_set():
@@ -153,13 +183,21 @@ class Indexer:
         try:
             bid = buildid.from_path(path)
         except buildid.BuildIDNotFoundError:
+            if self._stop.is_set():
+                return False
             self._mark_scanned(path, "no_build_id")
             logger.debug("skip elf without build-id: %s", path)
+            return False
+
+        if self._stop.is_set():
             return False
 
         with path.open("rb") as fh:
             elffile = ELFFile(fh)
             artifact_type_name = buildid.artifact_type(str(path), elffile)
+
+        if self._stop.is_set():
+            return False
 
         mtime_ns = getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))
         record = ArtifactRecord(

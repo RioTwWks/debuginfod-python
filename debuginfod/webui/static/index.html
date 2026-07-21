@@ -10,17 +10,16 @@
   <header class="header">
     <div class="header-inner">
       <h1>debuginfod-python</h1>
-      <p class="subtitle">Статистика индекса, dedup и поиск артефактов</p>
+      <p class="subtitle">Статистика индекса и поиск артефактов</p>
     </div>
     <div class="header-meta">
       <span id="uptime" class="badge">uptime —</span>
-      <button type="button" id="rescan-btn" class="badge rescan-btn" title="Переиндексировать SCAN_PATH; при включённом dedup — ingest xdelta">
+      <button type="button" id="rescan-btn" class="badge rescan-btn" title="Переиндексировать SCAN_PATH; при включённом dedup — ingest xdelta (decompress-dwz)">
         Сканировать
       </button>
       <span id="rescan-status" class="badge rescan-status" hidden></span>
       <a class="badge link" href="/healthz" target="_blank" rel="noopener">healthz</a>
       <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
-      <a class="badge link" href="/ui/benchmark/">benchmark</a>
     </div>
   </header>
 
@@ -38,38 +37,39 @@
       <section class="panel">
         <h2>Последнее сканирование</h2>
         <div class="scan-row" id="scan-info">—</div>
-        <p class="hint">«Пропущено» — файлы без изменений с прошлого прохода или ELF без GNU build-id (обрабатываются dedup).</p>
+        <p class="hint">«Пропущено» — файлы без изменений с прошлого прохода (mtime и размер совпали) или ELF без GNU build-id. При инкрементальном scan это нормально: почти всё дерево уже в индексе, обрабатываются только новые/изменённые файлы.</p>
       </section>
 
       <section class="panel">
         <h2>Поиск артефактов</h2>
         <div class="search-mode" role="tablist" aria-label="Режим поиска">
-          <button type="button" class="mode-btn active" data-key="buildid" role="tab" aria-selected="true">build-id</button>
-          <button type="button" class="mode-btn" data-key="glob" role="tab" aria-selected="false">glob</button>
-          <button type="button" class="mode-btn" data-key="file" role="tab" aria-selected="false">file</button>
+          <button type="button" class="mode-btn active" data-key="path" role="tab" aria-selected="true">путь</button>
+          <button type="button" class="mode-btn" data-key="name" role="tab" aria-selected="false">имя файла</button>
+          <button type="button" class="mode-btn" data-key="buildid" role="tab" aria-selected="false">build-id</button>
         </div>
         <form id="search-form" class="search-form">
           <input
             type="search"
             id="search-input"
             name="q"
-            placeholder="Префикс build-id (hex), например deadbeef"
+            placeholder="Released/Quik* или build_*/*.debug"
             autocomplete="off"
             spellcheck="false"
           >
           <button type="submit">Найти</button>
         </form>
-        <p class="hint" id="search-hint">Пустой запрос — первые 50 артефактов по build-id (префикс).</p>
+        <p class="hint" id="search-hint">Путь относительно SCAN_PATH. Пустой запрос — первые 50 файлов. Подстрока или fnmatch (* ?).</p>
         <div id="search-status" class="search-status"></div>
         <div class="table-wrap">
           <table class="results-table" id="results-table" hidden>
             <thead>
               <tr>
-                <th>build-id</th>
-                <th>тип</th>
+                <th class="col-toggle"></th>
+                <th>каталог</th>
                 <th>файл</th>
-                <th>kind</th>
-                <th>ссылки</th>
+                <th>тип</th>
+                <th>build-id</th>
+                <th>скачать</th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>

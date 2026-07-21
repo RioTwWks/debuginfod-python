@@ -50,6 +50,8 @@ def test_ui_index(ui_client: TestClient) -> None:
     resp = ui_client.get("/ui/")
     assert resp.status_code == 200
     assert "debuginfod-python" in resp.text
+    assert 'data-key="path"' in resp.text
+    assert "col-toggle" in resp.text
 
 
 def test_ui_redirect(ui_client: TestClient) -> None:
@@ -79,26 +81,45 @@ def test_ui_api_search_buildid(ui_client: TestClient) -> None:
     stats = ui_client.get("/ui/api/stats").json()
     assert stats["artifacts_total"] >= 1
 
-    all_results = ui_client.get("/ui/api/search")
+    all_results = ui_client.get("/ui/api/search", params={"key": "buildid"})
     assert all_results.status_code == 200
-    assert all_results.json()["count"] >= 1
+    payload = all_results.json()
+    assert payload["count"] >= 1
+    assert payload["grouped"]
+    assert payload["grouped"][0]["buildid"]
 
-    build_id = all_results.json()["results"][0]["buildid"]
+    build_id = payload["grouped"][0]["buildid"]
     prefix = build_id[:4]
-    filtered = ui_client.get("/ui/api/search", params={"q": prefix})
+    filtered = ui_client.get("/ui/api/search", params={"key": "buildid", "q": prefix})
     assert filtered.status_code == 200
     assert filtered.json()["count"] >= 1
 
 
+def test_ui_api_search_path(ui_client: TestClient) -> None:
+    resp = ui_client.get("/ui/api/search", params={"key": "path", "value": "*hello*"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert data["results"][0]["relative_path"]
+
+
+def test_ui_api_search_name(ui_client: TestClient) -> None:
+    resp = ui_client.get("/ui/api/search", params={"key": "name", "value": "hello"})
+    assert resp.status_code == 200
+    assert resp.json()["count"] >= 1
+
+
 def test_ui_api_search_glob(ui_client: TestClient) -> None:
-    resp = ui_client.get("/ui/api/search", params={"key": "glob", "value": "*hello*"})
+    meta = ui_client.get("/ui/api/search", params={"key": "buildid"}).json()
+    file_path = meta["grouped"][0]["entries"][0]["file"]
+    resp = ui_client.get("/ui/api/search", params={"key": "glob", "value": f"*{Path(file_path).name}"})
     assert resp.status_code == 200
     assert resp.json()["count"] >= 1
 
 
 def test_ui_api_search_file(ui_client: TestClient) -> None:
-    meta = ui_client.get("/ui/api/search").json()
-    file_path = meta["results"][0]["file"]
+    meta = ui_client.get("/ui/api/search", params={"key": "buildid"}).json()
+    file_path = meta["grouped"][0]["entries"][0]["file"]
     resp = ui_client.get("/ui/api/search", params={"key": "file", "value": file_path})
     assert resp.status_code == 200
     assert resp.json()["count"] == 1
@@ -107,6 +128,9 @@ def test_ui_api_search_file(ui_client: TestClient) -> None:
 def test_ui_api_search_errors(ui_client: TestClient) -> None:
     missing = ui_client.get("/ui/api/search", params={"key": "glob"})
     assert missing.status_code == 400
+
+    missing_name = ui_client.get("/ui/api/search", params={"key": "name"})
+    assert missing_name.status_code == 400
 
     unknown = ui_client.get("/ui/api/search", params={"key": "unknown"})
     assert unknown.status_code == 400
