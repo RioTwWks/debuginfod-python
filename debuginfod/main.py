@@ -81,6 +81,8 @@ def main(argv: list[str] | None = None) -> None:
         scan_runner=scan_runner,
         cache_dir=settings.cache_dir,
         dedup_restorer=dedup_service,
+        scan_enabled=settings.scan_enabled,
+        dedup_enabled=dedup_cfg.enabled,
         metadata_maxtime_sec=settings.metadata_maxtime_sec,
         metadata_page_size=settings.metadata_page_size,
         admin_key=settings.admin_key,
@@ -97,9 +99,11 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         uvicorn.run(app, host=settings.host, port=settings.port, log_level=settings.log_level)
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested")
     finally:
         if settings.scan_enabled and scan_runner is not None:
-            scan_runner.stop()
+            scan_runner.stop(timeout=2.0)
         db.close()
 
 

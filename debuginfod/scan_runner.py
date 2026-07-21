@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Callable
 
 from debuginfod.indexer import Indexer, ScanStats
@@ -22,14 +23,17 @@ class ScanRunner:
         interval_sec: int,
         on_complete: Callable[[ScanStats], None] | None = None,
         metrics: MetricsCollector | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.indexer = indexer
         self.interval_sec = interval_sec
         self.on_complete = on_complete
         self.metrics = metrics
-        self._stop = threading.Event()
+        self._stop = stop_event or threading.Event()
+        self.indexer.bind_stop_event(self._stop)
         self._thread: threading.Thread | None = None
         self._ready = False
+        self._scanning = False
         self._lock = threading.Lock()
         self._last_stats: ScanStats | None = None
 
@@ -38,30 +42,86 @@ class ScanRunner:
         return self._ready
 
     @property
+    def scanning(self) -> bool:
+        return self._scanning
+
+    @property
     def last_stats(self) -> ScanStats | None:
         return self._last_stats
 
+    def request_stop(self) -> None:
+        self._stop.set()
+        self.indexer.request_stop()
+
     def run_once(self) -> ScanStats:
+        if self._stop.is_set():
+            return ScanStats(cancelled=True)
+
+        with self._lock:
+            if self._scanning:
+                logger.info("Scan already in progress, skipping")
+                return self._last_stats or ScanStats()
+            self._scanning = True
+
         logger.info("Starting scan")
         started = time.perf_counter()
-        stats = self.indexer.scan()
+        try:
+            stats = self.indexer.scan()
+        finally:
+            with self._lock:
+                self._scanning = False
+
         duration = time.perf_counter() - started
+        finished_at = datetime.now(timezone.utc)
+
         with self._lock:
             self._last_stats = stats
-            self._ready = True
+            if not stats.cancelled:
+                self._ready = True
+
         if self.metrics is not None:
             self.metrics.record_scan(
                 indexed=stats.files_indexed,
                 skipped=stats.files_skipped,
                 errors=stats.errors,
                 duration_sec=duration,
+                finished_at=finished_at,
             )
-        logger.info(
-            "Scan complete: indexed=%d skipped=%d errors=%d",
-            stats.files_indexed,
-            stats.files_skipped,
-            stats.errors,
-        )
+
+        if not stats.cancelled:
+            try:
+                counts = self.indexer.db.count_stats()
+                storage = self.indexer.db.get_stats()
+                self.indexer.db.insert_scan_run(
+                    {
+                        "finished_at": finished_at.replace(microsecond=0).isoformat(),
+                        "duration_ms": int(duration * 1000),
+                        "indexed": stats.files_indexed,
+                        "skipped": stats.files_skipped,
+                        "errors": stats.errors,
+                        "artifacts_total": counts.artifacts_total,
+                        "scanned_files": counts.scanned_files_total,
+                        "bytes_on_disk": int(storage.get("bytes_on_disk", 0)),
+                    }
+                )
+            except Exception:
+                logger.exception("Failed to record scan run history")
+
+        if stats.cancelled:
+            logger.info(
+                "Scan cancelled: indexed=%d skipped=%d errors=%d",
+                stats.files_indexed,
+                stats.files_skipped,
+                stats.errors,
+            )
+        else:
+            logger.info(
+                "Scan complete: indexed=%d skipped=%d errors=%d",
+                stats.files_indexed,
+                stats.files_skipped,
+                stats.errors,
+            )
+
         if self.on_complete:
             self.on_complete(stats)
         return stats
@@ -70,12 +130,17 @@ class ScanRunner:
         self._thread = threading.Thread(target=self._loop, daemon=True, name="scan-runner")
         self._thread.start()
 
-    def stop(self) -> None:
-        self._stop.set()
+    def stop(self, timeout: float = 3.0) -> None:
+        self.request_stop()
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
+            if self._thread.is_alive():
+                logger.warning("Scan thread did not stop within %.0fs", timeout)
 
     def _loop(self) -> None:
-        self.run_once()
+        if not self._stop.is_set():
+            self.run_once()
         while not self._stop.wait(self.interval_sec):
+            if self._stop.is_set():
+                break
             self.run_once()

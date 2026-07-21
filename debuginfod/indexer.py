@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 
 from elftools.elf.elffile import ELFFile
@@ -27,6 +27,7 @@ class ScanStats:
     dedup_files_registered: int = 0
     dedup_files_compressed: int = 0
     dedup_errors: int = 0
+    cancelled: bool = False
 
 
 class Indexer:
@@ -38,17 +39,31 @@ class Indexer:
         scan_paths: list[Path],
         workers: int = 4,
         dedup_hook: object | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.db = db
         self.scan_paths = [p.resolve() for p in scan_paths]
         self.workers = max(1, workers)
         self.dedup_hook = dedup_hook
+        self._stop = stop_event or threading.Event()
+
+    def bind_stop_event(self, stop_event: threading.Event) -> None:
+        self._stop = stop_event
+
+    def request_stop(self) -> None:
+        self._stop.set()
 
     def scan(self) -> ScanStats:
         stats = ScanStats()
-        jobs: list[Path] = []
+        if self._stop.is_set():
+            stats.cancelled = True
+            return stats
 
+        jobs: list[Path] = []
         for root in self.scan_paths:
+            if self._stop.is_set():
+                stats.cancelled = True
+                return stats
             if not root.exists():
                 logger.warning("Scan path does not exist: %s", root)
                 continue
@@ -61,6 +76,9 @@ class Indexer:
                         stats.files_skipped += 1
                 continue
             for dirpath, _dirnames, filenames in os.walk(root):
+                if self._stop.is_set():
+                    stats.cancelled = True
+                    break
                 for name in filenames:
                     path = Path(dirpath) / name
                     stats.files_seen += 1
@@ -70,11 +88,19 @@ class Indexer:
                         stats.files_skipped += 1
                         continue
                     jobs.append(path.resolve())
+            if stats.cancelled:
+                break
 
-        if jobs:
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                futures = {pool.submit(self._index_elf_file, path): path for path in jobs}
+        if jobs and not self._stop.is_set():
+            pool = ThreadPoolExecutor(max_workers=self.workers)
+            futures = {pool.submit(self._index_elf_file, path): path for path in jobs}
+            try:
                 for future in as_completed(futures):
+                    if self._stop.is_set():
+                        stats.cancelled = True
+                        for pending in futures:
+                            pending.cancel()
+                        break
                     path = futures[future]
                     try:
                         indexed = future.result()
@@ -86,6 +112,12 @@ class Indexer:
                     except Exception:
                         stats.errors += 1
                         logger.exception("Failed to index %s", path)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        if self._stop.is_set():
+            stats.cancelled = True
+            return stats
 
         if self.dedup_hook is not None:
             try:
@@ -100,6 +132,8 @@ class Indexer:
         return stats
 
     def _should_scan(self, path: Path) -> bool:
+        if self._stop.is_set():
+            return False
         try:
             st = path.stat()
         except OSError:
@@ -113,6 +147,9 @@ class Indexer:
         self.db.mark_scanned(str(path.resolve()), mtime_ns, st.st_size, kind)
 
     def _index_elf_file(self, path: Path) -> bool:
+        if self._stop.is_set():
+            return False
+
         try:
             bid = buildid.from_path(path)
         except buildid.BuildIDNotFoundError:
@@ -136,9 +173,10 @@ class Indexer:
         with self.db.transaction():
             self.db.upsert_artifact(record)
             self._mark_scanned(path, "elf")
-            self._index_dwarf_sources(path, bid.value)
+            if not self._stop.is_set():
+                self._index_dwarf_sources(path, bid.value)
 
-        logger.info(
+        logger.debug(
             "Indexed %s build_id=%s type=%s",
             path,
             bid.value[:12],
@@ -158,6 +196,8 @@ class Indexer:
 
         seen: set[str] = set()
         for cu in dwarf.iter_CUs():
+            if self._stop.is_set():
+                return
             try:
                 top = cu.get_top_DIE()
                 comp_dir = ""

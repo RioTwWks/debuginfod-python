@@ -78,6 +78,83 @@ body {
   border-color: var(--accent);
 }
 
+.rescan-btn {
+  cursor: pointer;
+  color: var(--accent);
+  font: inherit;
+}
+
+.rescan-btn:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+.rescan-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.rescan-status {
+  color: var(--warn);
+}
+
+.main-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.main-tab {
+  padding: 0.55rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.main-tab.active {
+  background: var(--surface2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+.dedup-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.dedup-summary .summary-item {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+}
+
+.dedup-summary .summary-item strong {
+  display: block;
+  font-size: 1.1rem;
+}
+
+.dedup-summary .summary-item span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
 .container {
   max-width: 1100px;
   margin: 0 auto;
