@@ -5,15 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from elftools.elf.elffile import ELFFile
-
 from debuginfod import buildid
-from debuginfod.db import ArtifactRecord, Database, SourceRecord
+from debuginfod.db import Database
+from debuginfod.index_worker import IndexWorkerResult, process_elf_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +40,15 @@ class Indexer:
         workers: int = 4,
         dedup_hook: object | None = None,
         stop_event: threading.Event | None = None,
+        use_process_pool: bool = True,
     ) -> None:
         self.db = db
         self.scan_paths = [p.resolve() for p in scan_paths]
         self.workers = max(1, workers)
         self.dedup_hook = dedup_hook
         self._stop = stop_event or threading.Event()
-        self._executor: ThreadPoolExecutor | None = None
+        self._use_process_pool = use_process_pool
+        self._executor: ProcessPoolExecutor | ThreadPoolExecutor | None = None
         self._executor_lock = threading.Lock()
 
     def bind_stop_event(self, stop_event: threading.Event) -> None:
@@ -68,35 +69,48 @@ class Indexer:
 
         batch_size = max(self.workers * 8, 32)
         batch: list[Path] = []
+        pool_cls = ProcessPoolExecutor if self._use_process_pool else ThreadPoolExecutor
+        pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
 
-        for path in self._iter_elf_jobs(stats):
-            if self._stop.is_set():
-                stats.cancelled = True
-                return stats
-            batch.append(path)
-            if len(batch) >= batch_size:
-                self._index_batch(batch, stats)
-                batch.clear()
+        try:
+            pool = pool_cls(max_workers=self.workers)
+            with self._executor_lock:
+                self._executor = pool
+
+            for path in self._iter_elf_jobs(stats):
                 if self._stop.is_set():
                     stats.cancelled = True
                     return stats
+                batch.append(path)
+                if len(batch) >= batch_size:
+                    self._index_batch(pool, batch, stats)
+                    batch.clear()
+                    if self._stop.is_set():
+                        stats.cancelled = True
+                        return stats
 
-        if batch and not self._stop.is_set():
-            self._index_batch(batch, stats)
+            if batch and not self._stop.is_set():
+                self._index_batch(pool, batch, stats)
 
-        if self._stop.is_set():
-            stats.cancelled = True
-            return stats
+            if self._stop.is_set():
+                stats.cancelled = True
+                return stats
 
-        if self.dedup_hook is not None and not self._stop.is_set():
-            try:
-                self.dedup_hook.run_ingest_after_scan()
-                dedup = self.db.dedup_stats()
-                stats.dedup_files_registered = int(dedup.get("total_files", 0))
-                stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
-            except Exception:
-                stats.dedup_errors += 1
-                logger.exception("Dedup ingest after scan failed")
+            if self.dedup_hook is not None and not self._stop.is_set():
+                try:
+                    self.dedup_hook.run_ingest_after_scan()
+                    dedup = self.db.dedup_stats()
+                    stats.dedup_files_registered = int(dedup.get("total_files", 0))
+                    stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
+                except Exception:
+                    stats.dedup_errors += 1
+                    logger.exception("Dedup ingest after scan failed")
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+                with self._executor_lock:
+                    if self._executor is pool:
+                        self._executor = None
 
         return stats
 
@@ -128,15 +142,17 @@ class Indexer:
                         continue
                     yield path.resolve()
 
-    def _index_batch(self, jobs: list[Path], stats: ScanStats) -> None:
+    def _index_batch(
+        self,
+        pool: ProcessPoolExecutor | ThreadPoolExecutor,
+        jobs: list[Path],
+        stats: ScanStats,
+    ) -> None:
         if not jobs or self._stop.is_set():
             return
 
-        pool = ThreadPoolExecutor(max_workers=self.workers)
-        with self._executor_lock:
-            self._executor = pool
-        futures: dict[Future[bool], Path] = {
-            pool.submit(self._index_elf_file, path): path for path in jobs
+        futures: dict[Future[IndexWorkerResult], Path] = {
+            pool.submit(process_elf_path, str(path)): path for path in jobs
         }
         try:
             for future in as_completed(futures):
@@ -146,20 +162,53 @@ class Indexer:
                     break
                 path = futures[future]
                 try:
-                    indexed = future.result()
-                    if indexed:
-                        stats.files_indexed += 1
-                        stats.artifacts_added += 1
-                    else:
-                        stats.files_skipped += 1
+                    result = future.result()
+                    self._apply_worker_result(path, result, stats)
                 except Exception:
                     stats.errors += 1
                     logger.exception("Failed to index %s", path)
         finally:
-            pool.shutdown(wait=False, cancel_futures=True)
-            with self._executor_lock:
-                if self._executor is pool:
-                    self._executor = None
+            for pending in futures:
+                pending.cancel()
+
+    def _apply_worker_result(self, path: Path, result: IndexWorkerResult, stats: ScanStats) -> None:
+        if result.error:
+            stats.errors += 1
+            logger.error("Failed to index %s: %s", path, result.error)
+            return
+
+        if not result.indexed:
+            if result.mark_kind:
+                self._mark_scanned(path, result.mark_kind)
+            stats.files_skipped += 1
+            if result.mark_kind == "no_build_id":
+                logger.debug("skip elf without build-id: %s", path)
+            return
+
+        if result.artifact is None:
+            stats.files_skipped += 1
+            return
+
+        with self.db.transaction():
+            self.db.upsert_artifact(result.artifact)
+            self._mark_scanned(path, result.mark_kind or "elf")
+            for source in result.sources:
+                if self._stop.is_set():
+                    break
+                src_path = Path(source.file_path)
+                if not self._should_scan(src_path):
+                    continue
+                self.db.upsert_source(source)
+                self._mark_scanned(src_path, "source")
+
+        stats.files_indexed += 1
+        stats.artifacts_added += 1
+        logger.debug(
+            "Indexed %s build_id=%s type=%s",
+            path,
+            result.artifact.build_id[:12],
+            result.artifact.artifact_type,
+        )
 
     def _should_scan(self, path: Path) -> bool:
         if self._stop.is_set():
@@ -175,124 +224,3 @@ class Indexer:
         st = path.stat()
         mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
         self.db.mark_scanned(str(path.resolve()), mtime_ns, st.st_size, kind)
-
-    def _index_elf_file(self, path: Path) -> bool:
-        if self._stop.is_set():
-            return False
-
-        try:
-            bid = buildid.from_path(path)
-        except buildid.BuildIDNotFoundError:
-            if self._stop.is_set():
-                return False
-            self._mark_scanned(path, "no_build_id")
-            logger.debug("skip elf without build-id: %s", path)
-            return False
-
-        if self._stop.is_set():
-            return False
-
-        with path.open("rb") as fh:
-            elffile = ELFFile(fh)
-            artifact_type_name = buildid.artifact_type(str(path), elffile)
-
-        if self._stop.is_set():
-            return False
-
-        mtime_ns = getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))
-        record = ArtifactRecord(
-            build_id=bid.value,
-            artifact_type=artifact_type_name,
-            file_path=str(path.resolve()),
-            build_id_kind=bid.kind,
-            raw_build_id=bid.raw,
-            mtime_ns=mtime_ns,
-        )
-        with self.db.transaction():
-            self.db.upsert_artifact(record)
-            self._mark_scanned(path, "elf")
-            if not self._stop.is_set():
-                self._index_dwarf_sources(path, bid.value)
-
-        logger.debug(
-            "Indexed %s build_id=%s type=%s",
-            path,
-            bid.value[:12],
-            artifact_type_name,
-        )
-        return True
-
-    def _index_dwarf_sources(self, elf_path: Path, build_id_value: str) -> None:
-        try:
-            with elf_path.open("rb") as fh:
-                elffile = ELFFile(fh)
-                if not elffile.has_dwarf_info():
-                    return
-                dwarf = elffile.get_dwarf_info()
-        except Exception:
-            return
-
-        seen: set[str] = set()
-        for cu in dwarf.iter_CUs():
-            if self._stop.is_set():
-                return
-            try:
-                top = cu.get_top_DIE()
-                comp_dir = ""
-                if "DW_AT_comp_dir" in top.attributes:
-                    comp_dir = top.attributes["DW_AT_comp_dir"].value
-                    if isinstance(comp_dir, bytes):
-                        comp_dir = comp_dir.decode("utf-8", errors="replace")
-                file_name = ""
-                if "DW_AT_name" in top.attributes:
-                    file_name = top.attributes["DW_AT_name"].value
-                    if isinstance(file_name, bytes):
-                        file_name = file_name.decode("utf-8", errors="replace")
-                if not file_name:
-                    continue
-
-                if file_name.startswith("/"):
-                    source_path = file_name
-                elif comp_dir:
-                    source_path = f"{comp_dir.rstrip('/')}/{file_name}"
-                else:
-                    continue
-
-                if source_path in seen:
-                    continue
-                seen.add(source_path)
-
-                src = self._find_source_on_disk(source_path, elf_path)
-                if src is None:
-                    continue
-                if not self._should_scan(src):
-                    continue
-
-                self.db.upsert_source(
-                    SourceRecord(
-                        build_id=build_id_value,
-                        source_path=source_path,
-                        file_path=str(src.resolve()),
-                        mtime_ns=getattr(
-                            src.stat(),
-                            "st_mtime_ns",
-                            int(src.stat().st_mtime * 1_000_000_000),
-                        ),
-                    )
-                )
-                self._mark_scanned(src, "source")
-            except Exception:
-                logger.debug("DWARF CU source extraction failed for %s", elf_path, exc_info=True)
-
-    @staticmethod
-    def _find_source_on_disk(source_path: str, elf_path: Path) -> Path | None:
-        candidates = [Path(source_path)]
-        if not source_path.startswith("/"):
-            candidates.append(elf_path.parent / source_path)
-        for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    return candidate.resolve()
-            except OSError:
-                continue
-        return None
