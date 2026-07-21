@@ -60,6 +60,12 @@ def main(argv: list[str] | None = None) -> None:
             dedup_cfg.strategy,
         )
 
+    logger.info(
+        "Scan workers=%d (process pool for ELF parse); dedup workers=%d",
+        settings.scan_workers,
+        settings.dedup_workers if dedup_cfg.enabled else 0,
+    )
+
     metrics = MetricsCollector()
     indexer = Indexer(
         db=db,
