@@ -35,6 +35,7 @@ def _build_memory_governor(settings: object) -> MemoryGovernor:
         max_rss_bytes=mb_to_bytes(getattr(settings, "memory_max_ram_mb", 0)),
         max_swap_bytes=mb_to_bytes(getattr(settings, "memory_max_swap_mb", 0)),
         min_mem_available_bytes=mb_to_bytes(getattr(settings, "memory_min_available_mb", 0)),
+        dedup_peak_factor=getattr(settings, "memory_dedup_peak_factor", 3.0),
     )
     return MemoryGovernor(limits)
 
@@ -80,10 +81,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if memory_governor.limits.enabled:
         logger.info(
-            "Memory limits: max_rss=%d MiB max_swap=%d MiB min_available=%d MiB dwarf_max=%d MiB",
+            "Memory limits: max_rss=%d MiB max_swap=%d MiB (system-wide) "
+            "min_available=%d MiB dedup_peak=%.1fx dwarf_max=%d MiB",
             settings.memory_max_ram_mb,
             settings.memory_max_swap_mb,
             settings.memory_min_available_mb,
+            settings.memory_dedup_peak_factor,
             settings.scan_dwarf_max_mb,
         )
     else:
