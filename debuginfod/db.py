@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Generator, Literal
 
 from debuginfod.db_dedup import DedupDbMixin, DedupFileRecord, DedupProjectTotals
+from debuginfod.db_history import ScanHistoryMixin
 
 StorageKind = Literal["full", "delta"]
 
@@ -79,7 +80,7 @@ class MetadataResult:
     compression_ratio: float = 1.0
 
 
-class Database(DedupDbMixin):
+class Database(ScanHistoryMixin, DedupDbMixin):
     """SQLite or PostgreSQL metadata store."""
 
     def __init__(self, db_path: Path, database_url: str = "") -> None:
@@ -202,6 +203,7 @@ class Database(DedupDbMixin):
             """
         )
         self._ensure_artifact_columns()
+        self._migrate_scan_history()
         self._migrate_dedup()
         self._conn.commit()
 
@@ -212,6 +214,7 @@ class Database(DedupDbMixin):
             sql = statement.strip()
             if sql:
                 self._conn.execute(sql)
+        self._migrate_scan_history()
         self._migrate_dedup()
         self._conn.commit()
 

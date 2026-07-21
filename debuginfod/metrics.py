@@ -36,6 +36,7 @@ class MetricsCollector:
         skipped: int,
         errors: int,
         duration_sec: float,
+        finished_at: datetime | None = None,
     ) -> None:
         with self._lock:
             self._last_scan = ScanMetrics(
@@ -43,7 +44,7 @@ class MetricsCollector:
                 indexed=indexed,
                 skipped=skipped,
                 errors=errors,
-                finished_at=datetime.now(timezone.utc),
+                finished_at=finished_at or datetime.now(timezone.utc),
             )
 
     def uptime_seconds(self) -> int:

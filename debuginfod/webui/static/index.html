@@ -10,10 +10,14 @@
   <header class="header">
     <div class="header-inner">
       <h1>debuginfod-python</h1>
-      <p class="subtitle">Статистика индекса, xdelta3-хранилище и поиск артефактов</p>
+      <p class="subtitle">Статистика индекса, dedup и поиск артефактов</p>
     </div>
     <div class="header-meta">
       <span id="uptime" class="badge">uptime —</span>
+      <button type="button" id="rescan-btn" class="badge rescan-btn" title="Переиндексировать SCAN_PATH; при включённом dedup — ingest xdelta">
+        Сканировать
+      </button>
+      <span id="rescan-status" class="badge rescan-status" hidden></span>
       <a class="badge link" href="/healthz" target="_blank" rel="noopener">healthz</a>
       <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
       <a class="badge link" href="/ui/benchmark/">benchmark</a>
@@ -21,70 +25,143 @@
   </header>
 
   <main class="container">
-    <section class="stats-grid" id="stats-grid" aria-live="polite">
-      <div class="stat-card loading"><span class="stat-label">Загрузка…</span></div>
-    </section>
+    <nav class="main-tabs" role="tablist" aria-label="Разделы">
+      <button type="button" class="main-tab active" data-tab="dashboard" role="tab" aria-selected="true">Дашборд</button>
+      <button type="button" class="main-tab" data-tab="scans" role="tab" aria-selected="false">Сканирования</button>
+    </nav>
 
-    <section class="panel">
-      <h2>Последнее сканирование</h2>
-      <div class="scan-row" id="scan-info">—</div>
-    </section>
+    <div id="tab-dashboard" class="tab-panel active" role="tabpanel">
+      <section class="stats-grid" id="stats-grid" aria-live="polite">
+        <div class="stat-card loading"><span class="stat-label">Загрузка…</span></div>
+      </section>
 
-    <section class="panel" id="projects-panel">
-      <h2>Проекты (Quik dedup)</h2>
-      <div class="table-wrap">
-        <table class="results-table" id="projects-table">
-          <thead>
-            <tr>
-              <th>проект</th>
-              <th>сборок</th>
-              <th>артефактов</th>
-              <th>dedup</th>
-            </tr>
-          </thead>
-          <tbody id="projects-body">
-            <tr><td colspan="4">Загрузка…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+      <section class="panel">
+        <h2>Последнее сканирование</h2>
+        <div class="scan-row" id="scan-info">—</div>
+        <p class="hint">«Пропущено» — файлы без изменений с прошлого прохода или ELF без GNU build-id (обрабатываются dedup).</p>
+      </section>
 
-    <section class="panel">
-      <h2>Поиск артефактов</h2>
-      <div class="search-mode" role="tablist" aria-label="Режим поиска">
-        <button type="button" class="mode-btn active" data-key="buildid" role="tab" aria-selected="true">build-id</button>
-        <button type="button" class="mode-btn" data-key="glob" role="tab" aria-selected="false">glob</button>
-        <button type="button" class="mode-btn" data-key="file" role="tab" aria-selected="false">file</button>
-      </div>
-      <form id="search-form" class="search-form">
-        <input
-          type="search"
-          id="search-input"
-          name="q"
-          placeholder="Префикс build-id (hex), например deadbeef"
-          autocomplete="off"
-          spellcheck="false"
-        >
-        <button type="submit">Найти</button>
-      </form>
-      <p class="hint" id="search-hint">Пустой запрос — первые 50 артефактов по build-id (префикс).</p>
-      <div id="search-status" class="search-status"></div>
-      <div class="table-wrap">
-        <table class="results-table" id="results-table" hidden>
-          <thead>
-            <tr>
-              <th>build-id</th>
-              <th>тип</th>
-              <th>файл</th>
-              <th>kind</th>
-              <th>ссылки</th>
-            </tr>
-          </thead>
-          <tbody id="results-body"></tbody>
-        </table>
-      </div>
-      <button type="button" id="load-more" class="load-more" hidden>Ещё результаты</button>
-    </section>
+      <section class="panel">
+        <h2>Поиск артефактов</h2>
+        <div class="search-mode" role="tablist" aria-label="Режим поиска">
+          <button type="button" class="mode-btn active" data-key="buildid" role="tab" aria-selected="true">build-id</button>
+          <button type="button" class="mode-btn" data-key="glob" role="tab" aria-selected="false">glob</button>
+          <button type="button" class="mode-btn" data-key="file" role="tab" aria-selected="false">file</button>
+        </div>
+        <form id="search-form" class="search-form">
+          <input
+            type="search"
+            id="search-input"
+            name="q"
+            placeholder="Префикс build-id (hex), например deadbeef"
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <button type="submit">Найти</button>
+        </form>
+        <p class="hint" id="search-hint">Пустой запрос — первые 50 артефактов по build-id (префикс).</p>
+        <div id="search-status" class="search-status"></div>
+        <div class="table-wrap">
+          <table class="results-table" id="results-table" hidden>
+            <thead>
+              <tr>
+                <th>build-id</th>
+                <th>тип</th>
+                <th>файл</th>
+                <th>kind</th>
+                <th>ссылки</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+        <button type="button" id="load-more" class="load-more" hidden>Ещё результаты</button>
+      </section>
+    </div>
+
+    <div id="tab-scans" class="tab-panel" role="tabpanel" hidden>
+      <section class="panel">
+        <h2>Сводка индекса</h2>
+        <div class="dedup-summary" id="index-summary">Загрузка…</div>
+      </section>
+
+      <section class="panel">
+        <h2>Хранение .debug (xdelta + decompress-dwz)</h2>
+        <div class="dedup-summary" id="dedup-summary">Загрузка…</div>
+        <p class="hint" id="dedup-status"></p>
+      </section>
+
+      <section class="panel">
+        <h2>По папкам (build_*)</h2>
+        <div class="table-wrap">
+          <table class="results-table" id="dedup-projects-table">
+            <thead>
+              <tr>
+                <th>папка</th>
+                <th>build dirs</th>
+                <th>файлов</th>
+                <th>base</th>
+                <th>delta</th>
+                <th>full</th>
+                <th>было</th>
+                <th>на диске</th>
+                <th>экономия</th>
+              </tr>
+            </thead>
+            <tbody id="dedup-projects-body">
+              <tr><td colspan="9" class="muted">Загрузка…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>История индексации</h2>
+        <div class="table-wrap">
+          <table class="results-table" id="scan-runs-table">
+            <thead>
+              <tr>
+                <th>завершено</th>
+                <th>длительность</th>
+                <th>проиндексировано</th>
+                <th title="Без изменений с прошлого scan или без build-id">пропущено</th>
+                <th>ошибок</th>
+                <th>артефактов</th>
+                <th>файлов</th>
+                <th>объём</th>
+              </tr>
+            </thead>
+            <tbody id="scan-runs-body">
+              <tr><td colspan="8" class="muted">Загрузка…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>История dedup (xdelta)</h2>
+        <div class="table-wrap">
+          <table class="results-table" id="dedup-runs-table">
+            <thead>
+              <tr>
+                <th>завершено</th>
+                <th>длительность</th>
+                <th>проект</th>
+                <th>дельт</th>
+                <th>групп</th>
+                <th>ошибок</th>
+                <th>было</th>
+                <th>на диске</th>
+                <th>экономия</th>
+              </tr>
+            </thead>
+            <tbody id="dedup-runs-body">
+              <tr><td colspan="9" class="muted">Загрузка…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer class="footer">

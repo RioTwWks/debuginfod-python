@@ -64,6 +64,9 @@ def register_webui(
     db: Database,
     metrics: MetricsCollector,
     cache_dir: Path,
+    scan_runner: object | None = None,
+    scan_enabled: bool = True,
+    dedup_enabled: bool = False,
     benchmark_store: BenchmarkStore | None = None,
     benchmark_go_url: str = "http://localhost:8002",
     benchmark_py_url: str = "http://localhost:8003",
@@ -173,6 +176,7 @@ def register_webui(
         counts = db.count_stats()
         storage = db.get_stats()
         scan = metrics.last_scan()
+        dedup_totals = db.dedup_storage_totals() if dedup_enabled else {}
 
         payload: dict[str, Any] = {
             "uptime_seconds": metrics.uptime_seconds(),
@@ -187,14 +191,55 @@ def register_webui(
             "last_scan_errors": scan.errors,
             "http_requests_total": metrics.http_requests(),
             "cache_bytes": _dir_size(cache_dir),
-            "bytes_on_disk": storage.get("bytes_on_disk", 0),
-            "dedup": storage.get("dedup", {}),
-            "bytes_saved": storage.get("bytes_saved", 0),
-            "compression_ratio": storage.get("compression_ratio", 1.0),
+            "index_bytes_on_disk": storage.get("bytes_on_disk", 0),
+            "scan_enabled": scan_enabled,
+            "dedup_enabled": dedup_enabled,
+            "dedup_bytes_saved": int(dedup_totals.get("bytes_saved", 0)),
+            "dedup_saved_percent": float(dedup_totals.get("saved_percent", 0.0)),
         }
         if scan.finished_at is not None:
             payload["last_scan_finished_at"] = scan.finished_at.replace(microsecond=0).isoformat()
         return payload
+
+    @router.get("/ui/api/scans", include_in_schema=False)
+    async def ui_scans(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+        index_scans = [
+            {
+                "id": r.id,
+                "finished_at": r.finished_at,
+                "duration_ms": r.duration_ms,
+                "indexed": r.indexed,
+                "skipped": r.skipped,
+                "errors": r.errors,
+                "artifacts_total": r.artifacts_total,
+                "scanned_files": r.scanned_files,
+                "bytes_on_disk": r.bytes_on_disk,
+            }
+            for r in db.list_scan_runs(limit)
+        ]
+        return {
+            "index_summary": db.index_summary(),
+            "index_scans": index_scans,
+            "dedup_runs": db.list_dedup_runs(limit) if dedup_enabled else [],
+            "dedup_totals": db.dedup_storage_totals() if dedup_enabled else {},
+            "dedup_by_project": db.dedup_totals_by_project() if dedup_enabled else [],
+            "dedup_enabled": dedup_enabled,
+        }
+
+    @router.post("/ui/api/rescan", include_in_schema=False)
+    async def ui_rescan() -> dict[str, Any]:
+        if scan_runner is None or not scan_enabled:
+            raise HTTPException(status_code=503, detail="scan disabled")
+        if getattr(scan_runner, "scanning", False):
+            return {"status": "already_running"}
+        stats = await asyncio.to_thread(scan_runner.run_once)
+        return {
+            "status": "ok",
+            "indexed": stats.files_indexed,
+            "skipped": stats.files_skipped,
+            "errors": stats.errors,
+            "cancelled": stats.cancelled,
+        }
 
     @router.get("/ui/api/search", include_in_schema=False)
     async def ui_search(
