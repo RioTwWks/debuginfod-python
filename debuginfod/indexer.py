@@ -15,7 +15,7 @@ from typing import Iterator
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.index_worker import IndexWorkerResult, process_elf_path
-from debuginfod.memlimit import MemoryGovernor, SCAN_JOB_PEAK_FACTOR
+from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,7 @@ def _create_scan_executor(
     use_process_pool: bool,
     memory_governor: MemoryGovernor | None = None,
 ) -> ProcessPoolExecutor | ThreadPoolExecutor:
-    """Process pool needs a real __main__ file (not stdin); prefer fork on Linux."""
-    if memory_governor is not None and memory_governor.limits.enabled:
-        logger.info("Memory limits active: using thread pool for scan workers")
-        return ThreadPoolExecutor(max_workers=workers)
+    """Process pool isolates RAM per worker; prefer fork on Linux."""
     if not use_process_pool or _main_script_path() is None:
         if use_process_pool:
             logger.debug("Process pool unavailable for this entrypoint; using threads")
@@ -120,14 +117,6 @@ class Indexer:
         batch: list[Path] = []
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
         scan_workers = self.workers
-        if self._memory is not None and self._memory.limits.enabled:
-            scan_workers = self._memory.effective_scan_workers(self.workers)
-            if scan_workers < self.workers:
-                logger.info(
-                    "Scan parallelism reduced %d -> %d (memory limits)",
-                    self.workers,
-                    scan_workers,
-                )
 
         try:
             pool = _create_scan_executor(scan_workers, self._use_process_pool, self._memory)
@@ -218,15 +207,8 @@ class Indexer:
                 path = next(job_iter)
             except StopIteration:
                 return False
-            if self._memory is not None:
-                try:
-                    file_bytes = path.stat().st_size
-                except OSError:
-                    file_bytes = 0
-                if not self._memory.wait_for_job(
-                    file_bytes, self._stop, peak_factor=SCAN_JOB_PEAK_FACTOR
-                ):
-                    return False
+            if self._memory is not None and not self._memory.wait_for_headroom(self._stop):
+                return False
             pending[pool.submit(process_elf_path, str(path))] = path
             return True
 
