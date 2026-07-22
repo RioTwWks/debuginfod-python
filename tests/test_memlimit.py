@@ -7,6 +7,7 @@ from debuginfod.memlimit import (
     MemoryGovernor,
     MemoryLimits,
     MemoryUsage,
+    _job_pressure_reason,
     estimate_dedup_peak_bytes,
     mb_to_bytes,
 )
@@ -113,6 +114,21 @@ def test_preexisting_system_swap_does_not_block() -> None:
     )
     assert governor._over_limit(usage) is None
     assert governor.system_swap_delta_bytes(usage) == 0
+
+
+def test_job_headroom_ignores_sticky_rss_soft() -> None:
+    limits = MemoryLimits(max_rss_bytes=1000, min_mem_available_bytes=100)
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(rss_bytes=750, swap_bytes=0, mem_available_bytes=10**9)
+    assert governor._over_limit(usage) == "rss_soft"
+    assert _job_pressure_reason(governor, usage, 50 * 1024 * 1024, 0) is None
+
+
+def test_job_headroom_blocks_when_mem_unavailable() -> None:
+    limits = MemoryLimits(max_rss_bytes=10**12, min_mem_available_bytes=500)
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(rss_bytes=0, swap_bytes=0, mem_available_bytes=400)
+    assert _job_pressure_reason(governor, usage, 100, 0) == "mem_available"
 
 
 def test_wait_for_job_requires_headroom() -> None:

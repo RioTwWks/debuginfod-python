@@ -256,15 +256,48 @@ def _has_job_headroom(
     peak_bytes: int,
     reserved_bytes: int,
 ) -> bool:
-    if governor._over_limit(usage) is not None:
-        return False
+    return _job_pressure_reason(governor, usage, peak_bytes, reserved_bytes) is None
+
+
+def _job_pressure_reason(
+    governor: MemoryGovernor,
+    usage: MemoryUsage,
+    peak_bytes: int,
+    reserved_bytes: int,
+) -> str | None:
+    """Whether a heavy job may start. Uses mem_available first, not sticky rss_soft."""
     limits = governor.limits
-    if peak_bytes <= 0:
-        return True
-    need = peak_bytes + reserved_bytes
+    need = max(0, peak_bytes) + max(0, reserved_bytes)
+
+    if limits.max_system_ram_used_bytes > 0:
+        if system_ram_used_bytes(usage) >= limits.max_system_ram_used_bytes:
+            return "system_ram"
+    if limits.max_swap_bytes > 0:
+        if usage.swap_bytes >= limits.max_swap_bytes:
+            return "tree_swap"
+        delta = governor.system_swap_delta_bytes(usage)
+        if delta >= limits.max_swap_bytes:
+            return "swap_delta"
+
     if limits.min_mem_available_bytes > 0:
-        return usage.mem_available_bytes >= limits.min_mem_available_bytes + need
-    return usage.mem_available_bytes >= need
+        if usage.mem_available_bytes < limits.min_mem_available_bytes + need:
+            return "mem_available"
+    elif need > 0 and usage.mem_available_bytes < need:
+        return "job_headroom"
+
+    if limits.max_rss_bytes > 0:
+        if usage.rss_bytes >= limits.max_rss_bytes:
+            return "rss"
+        if need > 0:
+            projected = usage.rss_bytes + need
+            if projected > limits.max_rss_bytes:
+                slack = usage.mem_available_bytes
+                if limits.min_mem_available_bytes > 0:
+                    slack -= limits.min_mem_available_bytes
+                if slack < need:
+                    return "rss_projected"
+
+    return None
 
 
 class JobBudget:
@@ -385,16 +418,16 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = self._over_limit(usage)
-                if reason is None and _has_job_headroom(
+                job_reason = _job_pressure_reason(
                     self,
                     usage,
                     peak,
                     self._reserved_bytes,
-                ):
+                )
+                if job_reason is None:
                     return True
 
-            self._log_pressure(reason or "job_headroom", usage, peak_bytes=peak)
+            self._log_pressure(job_reason, usage, peak_bytes=peak)
             self._sleep(self.limits.poll_interval_sec)
 
     def wait_for_peak_bytes(
@@ -412,17 +445,35 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = self._over_limit(usage)
-                if reason is None and _has_job_headroom(
+                job_reason = _job_pressure_reason(
                     self,
                     usage,
                     peak_bytes,
                     self._reserved_bytes,
-                ):
+                )
+                if job_reason is None:
                     return True
 
-            self._log_pressure(reason or "job_headroom", usage, peak_bytes=peak_bytes)
+            self._log_pressure(job_reason, usage, peak_bytes=peak_bytes)
             self._sleep(self.limits.poll_interval_sec)
+
+    def prepare_for_heavy_work(self) -> None:
+        """Release heap and wait briefly after scan workers exit."""
+        release_heap()
+        if not self.limits.enabled:
+            return
+        before = process_tree_usage(self.root_pid).rss_bytes
+        for _ in range(RECOVERY_STABLE_POLLS):
+            self._sleep(self.limits.poll_interval_sec)
+        release_heap()
+        after = process_tree_usage(self.root_pid).rss_bytes
+        freed = max(0, before - after)
+        if freed >= 64 * 1024 * 1024:
+            logger.info(
+                "Memory released before heavy work: rss %.1f -> %.1f MiB",
+                before / (1024 * 1024),
+                after / (1024 * 1024),
+            )
 
     def wait_for_recovery(self, stop_event: object | None = None) -> bool:
         """Wait until memory is stably below soft limits (after a spike)."""
@@ -460,17 +511,17 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = self._over_limit(usage)
-                if reason is None and _has_job_headroom(
+                job_reason = _job_pressure_reason(
                     self,
                     usage,
                     peak,
                     self._reserved_bytes,
-                ):
+                )
+                if job_reason is None:
                     self._reserved_bytes += peak
                     return JobBudget(self, peak)
 
-            self._log_pressure(reason or "job_budget", usage, peak_bytes=peak)
+            self._log_pressure(job_reason or "job_budget", usage, peak_bytes=peak)
             self._sleep(self.limits.poll_interval_sec)
 
     def acquire_job_budget(
@@ -494,17 +545,17 @@ class MemoryGovernor:
 
             with self._lock:
                 usage = process_tree_usage(self.root_pid)
-                reason = self._over_limit(usage)
-                if reason is None and _has_job_headroom(
+                job_reason = _job_pressure_reason(
                     self,
                     usage,
                     peak,
                     self._reserved_bytes,
-                ):
+                )
+                if job_reason is None:
                     self._reserved_bytes += peak
                     return JobBudget(self, peak)
 
-            self._log_pressure(reason or "job_budget", usage, peak_bytes=peak)
+            self._log_pressure(job_reason or "job_budget", usage, peak_bytes=peak)
             self._sleep(self.limits.poll_interval_sec)
 
     def effective_workers(

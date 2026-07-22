@@ -15,7 +15,7 @@ from typing import Iterator
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.index_worker import IndexWorkerResult, process_elf_path
-from debuginfod.memlimit import MemoryGovernor
+from debuginfod.memlimit import MemoryGovernor, release_heap
 
 logger = logging.getLogger(__name__)
 
@@ -151,22 +151,27 @@ class Indexer:
             if self._stop.is_set():
                 stats.cancelled = True
                 return stats
-
-            if self.dedup_hook is not None and not self._stop.is_set():
-                try:
-                    self.dedup_hook.run_ingest_after_scan(stop_event=self._stop)
-                    dedup = self.db.dedup_stats()
-                    stats.dedup_files_registered = int(dedup.get("total_files", 0))
-                    stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
-                except Exception:
-                    stats.dedup_errors += 1
-                    logger.exception("Dedup ingest after scan failed")
         finally:
             if pool is not None:
-                pool.shutdown(wait=False, cancel_futures=True)
+                pool.shutdown(wait=True, cancel_futures=True)
                 with self._executor_lock:
                     if self._executor is pool:
                         self._executor = None
+                pool = None
+                if self._memory is not None and self._memory.limits.enabled:
+                    logger.info("Scan pool stopped; releasing memory before dedup")
+                    release_heap()
+                    self._memory.prepare_for_heavy_work()
+
+        if self.dedup_hook is not None and not self._stop.is_set():
+            try:
+                self.dedup_hook.run_ingest_after_scan(stop_event=self._stop)
+                dedup = self.db.dedup_stats()
+                stats.dedup_files_registered = int(dedup.get("total_files", 0))
+                stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
+            except Exception:
+                stats.dedup_errors += 1
+                logger.exception("Dedup ingest after scan failed")
 
         return stats
 
