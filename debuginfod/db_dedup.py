@@ -178,6 +178,28 @@ class DedupDbMixin:
         ).fetchall()
         return [self._row_to_dedup_file(r) for r in rows]
 
+    def get_dedup_group_base(self, project_name: str, file_stem: str) -> DedupFileRecord | None:
+        """Earliest done base/full file for a dedup group (retry after partial failure)."""
+        rows = self._execute(
+            """
+            SELECT f.id, f.build_dir_id, p.name AS project_name, f.file_path, f.filename,
+                f.file_stem, f.version, f.file_build_num, f.commit_tag,
+                f.storage_kind, f.base_file_id, f.delta_path, f.sha256,
+                f.original_size, f.compressed_size, f.status, f.error_msg
+            FROM dedup_files f
+            JOIN dedup_build_dirs b ON b.id = f.build_dir_id
+            JOIN dedup_projects p ON p.id = b.project_id
+            WHERE p.name = ? AND f.file_stem = ? AND f.status = 'done'
+              AND f.storage_kind IN ('base', 'full')
+            ORDER BY f.file_build_num, f.file_path
+            LIMIT 1
+            """,
+            (project_name, file_stem),
+        ).fetchall()
+        if not rows:
+            return None
+        return self._row_to_dedup_file(rows[0])
+
     def get_dedup_file_by_path(self, file_path: str) -> DedupFileRecord | None:
         rows = self._execute(
             """
@@ -244,6 +266,31 @@ class DedupDbMixin:
             "UPDATE dedup_files SET status = 'error', error_msg = ? WHERE id = ?",
             (message[:500], file_id),
         )
+
+    def reset_transient_dedup_errors(self) -> int:
+        """Re-queue files that failed due to transient memory pressure."""
+        patterns = (
+            "%memory limit exceeded%",
+            "%dedup stopped%",
+            "%stopped during subprocess%",
+        )
+        clauses = " OR ".join("error_msg LIKE ?" for _ in patterns)
+        row = self._execute(
+            f"SELECT COUNT(*) AS cnt FROM dedup_files WHERE status = 'error' AND ({clauses})",
+            patterns,
+        ).fetchone()
+        count = int(row["cnt"] if isinstance(row, dict) else row[0])
+        if count <= 0:
+            return 0
+        self._execute(
+            f"""
+            UPDATE dedup_files
+            SET status = 'pending', error_msg = ''
+            WHERE status = 'error' AND ({clauses})
+            """,
+            patterns,
+        )
+        return count
 
     def finish_build_dir_if_done(self, build_dir_id: int) -> None:
         row = self._execute(

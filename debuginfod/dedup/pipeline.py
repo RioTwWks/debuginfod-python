@@ -21,6 +21,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TRANSIENT_DEDUP_ERROR_MARKERS = (
+    "memory limit exceeded",
+    "dedup stopped",
+    "stopped during subprocess",
+)
+
+
+def is_transient_dedup_error(message: str) -> bool:
+    """Memory-pressure failures should stay pending for retry."""
+    lower = message.lower()
+    return any(marker in lower for marker in _TRANSIENT_DEDUP_ERROR_MARKERS)
+
 
 def _uses_decompress(strategy: str) -> bool:
     return "decompress" in strategy.lower()
@@ -103,6 +115,26 @@ def group_files(files: list[DedupFileRecord]) -> dict[str, list[DedupFileRecord]
     return groups
 
 
+def expand_dedup_groups_with_bases(
+    db: Database,
+    groups: dict[str, list[DedupFileRecord]],
+) -> dict[str, list[DedupFileRecord]]:
+    """Attach an already-done base when only delta files remain pending."""
+    expanded: dict[str, list[DedupFileRecord]] = {}
+    for key, group in groups.items():
+        members = list(group)
+        ids = {f.id for f in members}
+        has_done_base = any(
+            f.status == "done" and f.storage_kind in {"base", "full"} for f in members
+        )
+        if not has_done_base and members:
+            base = db.get_dedup_group_base(members[0].project_name, members[0].file_stem)
+            if base is not None and base.id not in ids:
+                members.append(base)
+        expanded[key] = sorted(members, key=lambda f: (f.file_build_num, f.file_path))
+    return expanded
+
+
 def run_ingest_all(opts: PipelineOptions) -> BackfillResult:
     result = BackfillResult(dry_run=opts.dry_run)
     n, err = _safe_discover(opts)
@@ -111,12 +143,18 @@ def run_ingest_all(opts: PipelineOptions) -> BackfillResult:
         result.errors += 1
         return result
 
+    if not opts.dry_run:
+        reset = opts.db.reset_transient_dedup_errors()
+        if reset:
+            logger.info("Reset %d dedup file(s) with transient memory errors to pending", reset)
+
     files = opts.db.list_all_pending_dedup_files()
     if opts.projects:
         allowed = {p.strip().replace("\\", "/") for p in opts.projects if p.strip()}
         files = [f for f in files if f.project_name.replace("\\", "/") in allowed]
 
     groups = group_files(files)
+    groups = expand_dedup_groups_with_bases(opts.db, groups)
     result.groups_processed = len(groups)
     from debuginfod.dedup.workers import process_groups
 
@@ -163,6 +201,8 @@ def process_group(
     memory_governor: "MemoryGovernor | None" = None,
     stop_event: object | None = None,
 ) -> tuple[int, int, int, Exception | None]:
+    from debuginfod.memlimit import release_heap
+
     gov = memory_governor or opts.memory_governor
     bytes_before = sum(f.original_size for f in group)
     base = group[0]
@@ -180,22 +220,31 @@ def process_group(
         if not gov.wait_for_peak_bytes(peak_bytes, stop_event):
             return 0, bytes_before, 0, RuntimeError("dedup stopped (memory pressure)")
 
-    try:
-        opts.preprocessor.apply_in_place(
-            base.file_path,
-            memory_governor=gov,
-            stop_event=stop_event,
-        )
-    except Exception as exc:
-        opts.db.mark_dedup_file_error(base.id, str(exc))
-        return 0, bytes_before, 0, exc
+    base_already_done = base.status == "done" and base.storage_kind == "base"
+    if base_already_done:
+        base_sha = base.sha256 or file_sha256(base.file_path)
+        base_size = int(base.compressed_size or Path(base.file_path).stat().st_size)
+    else:
+        try:
+            opts.preprocessor.apply_in_place(
+                base.file_path,
+                memory_governor=gov,
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            if is_transient_dedup_error(str(exc)):
+                logger.warning("dedup preprocess deferred for %s: %s", base.file_path, exc)
+                release_heap()
+                if gov is not None:
+                    gov.wait_for_recovery(stop_event)
+                return 0, bytes_before, 0, exc
+            opts.db.mark_dedup_file_error(base.id, str(exc))
+            return 0, bytes_before, 0, exc
 
-    from debuginfod.memlimit import release_heap
-
-    release_heap()
-    base_sha = file_sha256(base.file_path)
-    base_size = Path(base.file_path).stat().st_size
-    opts.db.mark_dedup_file_done(base.id, "base", None, "", base_sha, base_size)
+        release_heap()
+        base_sha = file_sha256(base.file_path)
+        base_size = Path(base.file_path).stat().st_size
+        opts.db.mark_dedup_file_done(base.id, "base", None, "", base_sha, base_size)
     bytes_after = base_size
     compressed = 0
     group_err: Exception | None = None
@@ -204,6 +253,8 @@ def process_group(
         if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
             group_err = RuntimeError("dedup stopped")
             break
+        if target.status == "done":
+            continue
         if _file_exceeds_dedup_max(target, opts):
             msg = f"file exceeds DEBUGINFOD_DEDUP_MAX_FILE_MB={opts.dedup_max_file_mb}"
             opts.db.mark_dedup_file_error(target.id, msg)
@@ -222,7 +273,12 @@ def process_group(
             release_heap()
         except Exception as exc:
             logger.warning("dedup compress failed for %s: %s", target.file_path, exc)
-            opts.db.mark_dedup_file_error(target.id, str(exc))
+            if is_transient_dedup_error(str(exc)):
+                release_heap()
+                if gov is not None:
+                    gov.wait_for_recovery(stop_event)
+            else:
+                opts.db.mark_dedup_file_error(target.id, str(exc))
             group_err = exc
 
     if opts.compress_base and opts.objcopy_zstd.available():
@@ -241,7 +297,13 @@ def process_group(
                 bytes_after = bytes_after - base_size + comp_size
                 release_heap()
             except Exception as exc:
-                opts.db.mark_dedup_file_error(base.id, f"compress base: {exc}")
+                if is_transient_dedup_error(str(exc)):
+                    logger.warning("dedup base compress deferred for %s: %s", base.file_path, exc)
+                    release_heap()
+                    if gov is not None:
+                        gov.wait_for_recovery(stop_event)
+                else:
+                    opts.db.mark_dedup_file_error(base.id, f"compress base: {exc}")
                 group_err = exc
 
     return compressed, bytes_before, bytes_after, group_err

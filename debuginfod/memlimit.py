@@ -259,6 +259,27 @@ def _has_job_headroom(
     return _job_pressure_reason(governor, usage, peak_bytes, reserved_bytes) is None
 
 
+def _rss_pressure_reason(
+    usage: MemoryUsage,
+    limits: MemoryLimits,
+    need: int,
+) -> str | None:
+    """RSS cap applies only when MemAvailable cannot fund the job peak."""
+    if limits.max_rss_bytes <= 0:
+        return None
+    projected = usage.rss_bytes + max(0, need)
+    if projected <= limits.max_rss_bytes:
+        return None
+    slack = usage.mem_available_bytes
+    if limits.min_mem_available_bytes > 0:
+        slack -= limits.min_mem_available_bytes
+    if need > 0 and slack >= need:
+        return None
+    if usage.rss_bytes >= limits.max_rss_bytes:
+        return "rss"
+    return "rss_projected"
+
+
 def _job_pressure_reason(
     governor: MemoryGovernor,
     usage: MemoryUsage,
@@ -285,17 +306,9 @@ def _job_pressure_reason(
     elif need > 0 and usage.mem_available_bytes < need:
         return "job_headroom"
 
-    if limits.max_rss_bytes > 0:
-        if usage.rss_bytes >= limits.max_rss_bytes:
-            return "rss"
-        if need > 0:
-            projected = usage.rss_bytes + need
-            if projected > limits.max_rss_bytes:
-                slack = usage.mem_available_bytes
-                if limits.min_mem_available_bytes > 0:
-                    slack -= limits.min_mem_available_bytes
-                if slack < need:
-                    return "rss_projected"
+    rss_reason = _rss_pressure_reason(usage, limits, need)
+    if rss_reason is not None:
+        return rss_reason
 
     return None
 
@@ -476,7 +489,7 @@ class MemoryGovernor:
             )
 
     def wait_for_recovery(self, stop_event: object | None = None) -> bool:
-        """Wait until memory is stably below soft limits (after a spike)."""
+        """Wait until memory is stably below limits (after a spike)."""
         if not self.limits.enabled:
             return True
 
@@ -485,7 +498,7 @@ class MemoryGovernor:
             if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
                 return False
             usage = process_tree_usage(self.root_pid)
-            reason = self._over_limit(usage)
+            reason = _job_pressure_reason(self, usage, 0, self._reserved_bytes)
             if reason is None:
                 ok_streak += 1
             else:
@@ -654,7 +667,8 @@ def run_subprocess_monitored(
                     proc.terminate()
                     proc.wait(timeout=10)
                     raise RuntimeError("stopped during subprocess")
-                if memory_governor._over_limit(memory_governor.snapshot()) is not None:
+                usage = memory_governor.snapshot()
+                if _job_pressure_reason(memory_governor, usage, 0, memory_governor._reserved_bytes) is not None:
                     proc.terminate()
                     proc.wait(timeout=10)
                     memory_governor.wait_for_recovery(stop_event)
