@@ -8,6 +8,7 @@ from debuginfod.memlimit import (
     MemoryLimits,
     MemoryUsage,
     _job_pressure_reason,
+    _rss_pressure_reason,
     estimate_dedup_peak_bytes,
     mb_to_bytes,
 )
@@ -122,6 +123,31 @@ def test_job_headroom_ignores_sticky_rss_soft() -> None:
     usage = MemoryUsage(rss_bytes=750, swap_bytes=0, mem_available_bytes=10**9)
     assert governor._over_limit(usage) == "rss_soft"
     assert _job_pressure_reason(governor, usage, 50 * 1024 * 1024, 0) is None
+
+
+def test_job_headroom_allows_sticky_rss_when_mem_available() -> None:
+    limits = MemoryLimits(max_rss_bytes=mb_to_bytes(5200), min_mem_available_bytes=mb_to_bytes(1536))
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(
+        rss_bytes=mb_to_bytes(5206),
+        swap_bytes=0,
+        mem_available_bytes=mb_to_bytes(7600),
+    )
+    peak = mb_to_bytes(1280)
+    assert _rss_pressure_reason(usage, limits, peak) is None
+    assert _job_pressure_reason(governor, usage, peak, mb_to_bytes(1548)) is None
+
+
+def test_job_headroom_blocks_when_slack_insufficient_at_rss_cap() -> None:
+    limits = MemoryLimits(max_rss_bytes=mb_to_bytes(5200), min_mem_available_bytes=mb_to_bytes(1536))
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(
+        rss_bytes=mb_to_bytes(5206),
+        swap_bytes=0,
+        mem_available_bytes=mb_to_bytes(2500),
+    )
+    peak = mb_to_bytes(1280)
+    assert _job_pressure_reason(governor, usage, peak, 0) == "mem_available"
 
 
 def test_job_headroom_blocks_when_mem_unavailable() -> None:
