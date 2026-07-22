@@ -102,6 +102,20 @@ def test_ui_api_search_path(ui_client: TestClient) -> None:
     assert data["count"] >= 1
     assert data["results"][0]["relative_path"]
 
+    browse = ui_client.get("/ui/api/search", params={"key": "path"})
+    assert browse.status_code == 200
+    assert browse.json()["count"] >= 1
+
+
+def test_ui_api_artifact_detail(ui_client: TestClient) -> None:
+    meta = ui_client.get("/ui/api/search", params={"key": "buildid"}).json()
+    build_id = meta["grouped"][0]["buildid"]
+    resp = ui_client.get(f"/ui/api/artifact/{build_id}")
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert detail["buildid"] == build_id
+    assert detail["entries"]
+
 
 def test_ui_api_search_name(ui_client: TestClient) -> None:
     resp = ui_client.get("/ui/api/search", params={"key": "name", "value": "hello"})

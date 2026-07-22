@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from debuginfod.benchmark import discover_binaries, resolve_testdata_path, run_b
 from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.db import Database, MetadataResult
 from debuginfod.webui.search import (
+    artifact_detail_for_ui,
     enrich_flat_results,
     metadata_to_ui_row,
     search_buildid_grouped,
@@ -28,6 +30,7 @@ from debuginfod.metrics import MetricsCollector
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+STATS_CACHE_TTL_SEC = 15.0
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -86,6 +89,43 @@ def register_webui(
     router = APIRouter()
     bench_store = benchmark_store or BenchmarkStore()
     default_testdata = benchmark_testdata or Path("testdata/versions")
+    stats_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+
+    def _cached_stats_payload() -> dict[str, Any]:
+        now = time.monotonic()
+        cached = stats_cache.get("payload")
+        if cached is not None and now < float(stats_cache.get("expires_at", 0.0)):
+            return cached
+
+        counts = db.count_stats()
+        storage = db.get_stats()
+        scan = metrics.last_scan()
+        dedup_totals = db.dedup_storage_totals() if dedup_enabled else {}
+
+        payload: dict[str, Any] = {
+            "uptime_seconds": metrics.uptime_seconds(),
+            "artifacts_total": counts.artifacts_total,
+            "artifacts_executable": counts.artifacts_executable,
+            "artifacts_debuginfo": counts.artifacts_debuginfo,
+            "sources_total": counts.sources_total,
+            "scanned_files_total": counts.scanned_files_total,
+            "last_scan_duration_ms": scan.duration_ms,
+            "last_scan_indexed": scan.indexed,
+            "last_scan_skipped": scan.skipped,
+            "last_scan_errors": scan.errors,
+            "http_requests_total": metrics.http_requests(),
+            "cache_bytes": _dir_size(cache_dir),
+            "index_bytes_on_disk": storage.get("bytes_on_disk", 0),
+            "scan_enabled": scan_enabled,
+            "dedup_enabled": dedup_enabled,
+            "dedup_bytes_saved": int(dedup_totals.get("bytes_saved", 0)),
+            "dedup_saved_percent": float(dedup_totals.get("saved_percent", 0.0)),
+        }
+        if scan.finished_at is not None:
+            payload["last_scan_finished_at"] = scan.finished_at.replace(microsecond=0).isoformat()
+        stats_cache["payload"] = payload
+        stats_cache["expires_at"] = now + STATS_CACHE_TTL_SEC
+        return payload
 
     @router.get("/ui", include_in_schema=False)
     async def redirect_ui() -> RedirectResponse:
@@ -180,33 +220,15 @@ def register_webui(
 
     @router.get("/ui/api/stats", include_in_schema=False)
     async def ui_stats() -> dict[str, Any]:
-        counts = db.count_stats()
-        storage = db.get_stats()
-        scan = metrics.last_scan()
-        dedup_totals = db.dedup_storage_totals() if dedup_enabled else {}
+        return await asyncio.to_thread(_cached_stats_payload)
 
-        payload: dict[str, Any] = {
-            "uptime_seconds": metrics.uptime_seconds(),
-            "artifacts_total": counts.artifacts_total,
-            "artifacts_executable": counts.artifacts_executable,
-            "artifacts_debuginfo": counts.artifacts_debuginfo,
-            "sources_total": counts.sources_total,
-            "scanned_files_total": counts.scanned_files_total,
-            "last_scan_duration_ms": scan.duration_ms,
-            "last_scan_indexed": scan.indexed,
-            "last_scan_skipped": scan.skipped,
-            "last_scan_errors": scan.errors,
-            "http_requests_total": metrics.http_requests(),
-            "cache_bytes": _dir_size(cache_dir),
-            "index_bytes_on_disk": storage.get("bytes_on_disk", 0),
-            "scan_enabled": scan_enabled,
-            "dedup_enabled": dedup_enabled,
-            "dedup_bytes_saved": int(dedup_totals.get("bytes_saved", 0)),
-            "dedup_saved_percent": float(dedup_totals.get("saved_percent", 0.0)),
-        }
-        if scan.finished_at is not None:
-            payload["last_scan_finished_at"] = scan.finished_at.replace(microsecond=0).isoformat()
-        return payload
+    @router.get("/ui/api/artifact/{build_id}", include_in_schema=False)
+    async def ui_artifact_detail(build_id: str) -> dict[str, Any]:
+        roots = scan_paths or []
+        detail = await asyncio.to_thread(artifact_detail_for_ui, db, build_id, roots)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        return detail
 
     @router.get("/ui/api/scans", include_in_schema=False)
     async def ui_scans(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
