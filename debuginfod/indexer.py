@@ -113,10 +113,20 @@ class Indexer:
             stats.cancelled = True
             return stats
 
-        batch_size = max(self.workers * 2, 8)
+        scan_workers = self.workers
+        if self._memory is not None and self._memory.limits.enabled:
+            capped = self._memory.effective_scan_workers(self.workers)
+            if capped < scan_workers:
+                logger.info(
+                    "Scan workers capped %d -> %d (memory limits)",
+                    scan_workers,
+                    capped,
+                )
+            scan_workers = capped
+
+        batch_size = max(scan_workers * 2, 8)
         batch: list[Path] = []
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
-        scan_workers = self.workers
 
         try:
             pool = _create_scan_executor(scan_workers, self._use_process_pool, self._memory)
@@ -207,7 +217,10 @@ class Indexer:
                 path = next(job_iter)
             except StopIteration:
                 return False
-            if self._memory is not None and not self._memory.wait_for_headroom(self._stop):
+            if self._memory is not None and not self._memory.wait_for_headroom(
+                self._stop,
+                for_scan=True,
+            ):
                 return False
             pending[pool.submit(process_elf_path, str(path))] = path
             return True
