@@ -109,11 +109,9 @@ def main(argv: list[str] | None = None) -> None:
             settings.scan_dwarf_max_mb,
         )
 
-    scan_mode = "thread pool (memory limits)" if memory_governor.limits.enabled else "process pool"
     logger.info(
-        "Scan workers=%d (%s); dedup workers=%d",
+        "Scan workers=%d (process pool when available); dedup workers=%d",
         settings.scan_workers,
-        scan_mode,
         settings.dedup_workers if dedup_cfg.enabled else 0,
     )
 

@@ -65,7 +65,11 @@ def process_elf_path(path_str: str) -> IndexWorkerResult:
         file_size = path.stat().st_size
     except OSError:
         file_size = 0
-    if _DWARF_MAX_BYTES <= 0 or file_size <= _DWARF_MAX_BYTES:
+    # pyelftools DWARF on large .debug files is very slow and RAM-heavy vs Go debug/dwarf.
+    # Index sources from executables only; debuginfo build-id is enough for /buildid/... HTTP.
+    if artifact_type_name == "executable" and (
+        _DWARF_MAX_BYTES <= 0 or file_size <= _DWARF_MAX_BYTES
+    ):
         result.sources = _extract_dwarf_sources(path, bid.value)
     result.indexed = True
     result.mark_kind = "elf"
