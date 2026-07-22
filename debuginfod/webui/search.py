@@ -274,19 +274,23 @@ def enrich_flat_results(
     rows: list[UIArtifactRow],
     scan_roots: list[Path],
     *,
-    with_comment: bool = True,
-    source_limit: int = 20,
+    with_comment: bool = False,
+    source_limit: int = 0,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         enrich_artifact_row(row, scan_roots, with_comment=with_comment)
-        sources, count = db.list_sources_for_buildid_ui(
-            row.buildid,
-            scan_roots,
-            limit=source_limit,
-        )
-        row.sources = sources
-        row.sources_count = count
+        if source_limit > 0:
+            sources, count = db.list_sources_for_buildid_ui(
+                row.buildid,
+                scan_roots,
+                limit=source_limit,
+            )
+            row.sources = sources
+            row.sources_count = count
+        else:
+            row.sources = []
+            row.sources_count = db.count_sources_for_buildid(row.buildid)
         out.append(_artifact_to_dict(row))
     return out
 
@@ -296,18 +300,19 @@ def search_buildid_grouped(
     query: str,
     limit: int,
     scan_roots: list[Path],
+    *,
+    include_details: bool = False,
 ) -> list[dict[str, Any]]:
     raw_limit = min(limit * 4, 200)
     records = db.search_buildid_for_ui(query, raw_limit)
-    mtime_by_key = db.artifact_mtime_map()
 
     groups: dict[str, list[UIArtifactRow]] = {}
     order: list[str] = []
     meta: dict[str, tuple[str, str]] = {}
 
     for record in records:
-        row = _row_from_metadata(record, mtime_by_key.get((record.buildid, record.type), 0))
-        enrich_artifact_row(row, scan_roots, with_comment=True)
+        row = _row_from_metadata(record, record.mtime_ns)
+        enrich_artifact_row(row, scan_roots, with_comment=include_details)
         if record.buildid not in groups:
             groups[record.buildid] = []
             order.append(record.buildid)
@@ -321,7 +326,13 @@ def search_buildid_grouped(
         entries = groups[build_id]
         types = sorted({entry.type for entry in entries})
         kind, raw = meta.get(build_id, ("", ""))
-        sources, count = db.list_sources_for_buildid_ui(build_id, scan_roots, limit=20)
+        sources: list[dict[str, Any]] = []
+        count = db.count_sources_for_buildid(build_id)
+        if include_details and count > 0:
+            sources, count = db.list_sources_for_buildid_ui(build_id, scan_roots, limit=20)
+        if include_details:
+            for entry in entries:
+                enrich_artifact_row(entry, scan_roots, with_comment=True)
         out.append(
             _grouped_to_dict(
                 build_id,
@@ -338,6 +349,35 @@ def search_buildid_grouped(
     return out
 
 
+def artifact_detail_for_ui(
+    db: Database,
+    build_id: str,
+    scan_roots: list[Path],
+) -> dict[str, Any] | None:
+    """Full artifact detail for one build-id (lazy UI expand)."""
+    records = db.list_artifacts_for_buildid(build_id)
+    if not records:
+        return None
+    entries: list[UIArtifactRow] = []
+    for record in records:
+        row = _row_from_record(record)
+        enrich_artifact_row(row, scan_roots, with_comment=True)
+        entries.append(row)
+    types = sorted({entry.type for entry in entries})
+    kind = entries[0].buildid_kind if entries else ""
+    raw = entries[0].raw_buildid if entries else ""
+    sources, count = db.list_sources_for_buildid_ui(build_id, scan_roots, limit=20)
+    return _grouped_to_dict(
+        build_id,
+        types,
+        entries,
+        buildid_kind=kind,
+        raw_buildid=raw,
+        sources=sources,
+        sources_count=count,
+    )
+
+
 def search_path_for_ui(
     db: Database,
     scan_roots: list[Path],
@@ -345,6 +385,23 @@ def search_path_for_ui(
     offset: int,
     limit: int,
 ) -> tuple[list[dict[str, Any]], bool, int]:
+    query = query.strip()
+    has_glob = any(ch in query for ch in "*?[")
+
+    if not has_glob:
+        if query:
+            page_records, has_more = db.list_artifact_records_page(
+                offset,
+                limit,
+                path_substring=query.replace("\\", "/"),
+            )
+        else:
+            page_records, has_more = db.list_artifact_records_page(offset, limit)
+        rows = [_row_from_record(record) for record in page_records]
+        enriched = enrich_flat_results(db, rows, scan_roots)
+        next_offset = offset + len(page_records)
+        return enriched, not has_more, next_offset if has_more else 0
+
     matches: list[UIArtifactRow] = []
     for row in _iter_ui_artifacts(db):
         enrich_artifact_row(row, scan_roots)

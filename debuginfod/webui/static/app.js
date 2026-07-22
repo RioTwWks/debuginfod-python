@@ -30,6 +30,10 @@
   let rescanPollTimer = null;
   let lastResultRows = [];
   let expandedRowIdx = null;
+  const detailCache = new Map();
+  const MAX_RESULT_ROWS = 300;
+  const STATS_POLL_MS = 60000;
+  let statsPollTimer = null;
 
   const hints = {
     path:
@@ -80,9 +84,12 @@
   }
 
   function escapeHtml(s) {
-    const div = document.createElement("div");
-    div.textContent = s;
-    return div.innerHTML;
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function shortBuildID(id) {
@@ -359,12 +366,56 @@
     });
     resultsBody.querySelectorAll(".artifact-detail-row").forEach(function (tr) {
       const idx = parseInt(tr.getAttribute("data-detail-for") || "-1", 10);
-      tr.hidden = idx !== expandedRowIdx;
+      const expanded = idx === expandedRowIdx;
+      tr.hidden = !expanded;
+      if (expanded) {
+        const cell = tr.querySelector(".artifact-detail-cell");
+        if (cell && detailCache.has(idx)) {
+          cell.innerHTML = detailCache.get(idx);
+        }
+      }
     });
   }
 
   function toggleRow(idx) {
-    expandedRowIdx = expandedRowIdx === idx ? null : idx;
+    if (expandedRowIdx === idx) {
+      expandedRowIdx = null;
+      refreshExpandedRows();
+      return;
+    }
+    expandedRowIdx = idx;
+    refreshExpandedRows();
+    if (!detailCache.has(idx)) {
+      loadRowDetail(idx);
+    } else {
+      bindCopyButtons(resultsBody);
+    }
+  }
+
+  async function loadRowDetail(idx) {
+    const row = normalizeRow(lastResultRows[idx]);
+    const buildid = row.buildid;
+    if (!buildid) {
+      detailCache.set(idx, '<p class="muted">Нет build-id</p>');
+      refreshExpandedRows();
+      return;
+    }
+    const cell = resultsBody.querySelector(
+      '.artifact-detail-row[data-detail-for="' + idx + '"] .artifact-detail-cell'
+    );
+    if (cell) {
+      cell.innerHTML = '<div class="muted">Загрузка…</div>';
+    }
+    try {
+      const res = await fetch("/ui/api/artifact/" + encodeURIComponent(buildid));
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status);
+      }
+      const data = await res.json();
+      detailCache.set(idx, renderDetailInner(data));
+    } catch (err) {
+      detailCache.set(idx, '<p class="error">Ошибка: ' + escapeHtml(err.message) + "</p>");
+    }
     refreshExpandedRows();
     bindCopyButtons(resultsBody);
   }
@@ -373,11 +424,23 @@
     nextOffset = 0;
     lastSearchValue = "";
     expandedRowIdx = null;
+    detailCache.clear();
     searchStatus.textContent = message || "";
     searchStatus.classList.remove("error");
     resultsTable.hidden = true;
     resultsBody.innerHTML = "";
     loadMoreBtn.hidden = true;
+  }
+
+  function scheduleStatsPoll() {
+    if (statsPollTimer) {
+      clearInterval(statsPollTimer);
+    }
+    statsPollTimer = setInterval(function () {
+      if (!document.hidden) {
+        loadStats();
+      }
+    }, STATS_POLL_MS);
   }
 
   function setSearchMode(key) {
@@ -391,10 +454,10 @@
     searchInput.placeholder = placeholders[key] || "";
     searchHint.textContent = hints[key] || "";
     searchInput.value = "";
-    if (key === "path" || key === "buildid") {
-      doSearch("", false);
-    } else {
+    if (key === "name") {
       clearSearchResults("Введите имя файла и нажмите «Найти»");
+    } else {
+      clearSearchResults("Нажмите «Найти» для обзора первых 50 результатов");
     }
   }
 
@@ -777,15 +840,21 @@
     }
   }
 
-  function renderDetailRow(row, idx) {
+  function renderDetailRow(idx) {
     const hidden = idx !== expandedRowIdx;
+    const inner =
+      expandedRowIdx === idx && detailCache.has(idx)
+        ? detailCache.get(idx)
+        : expandedRowIdx === idx
+          ? '<div class="muted">Загрузка…</div>'
+          : "";
     return (
       '<tr class="artifact-detail-row" data-detail-for="' +
       idx +
       '"' +
       (hidden ? " hidden" : "") +
       '><td colspan="6" class="artifact-detail-cell">' +
-      renderDetailInner(row) +
+      inner +
       "</td></tr>"
     );
   }
@@ -826,7 +895,7 @@
       artifactLinks(row.buildid, types) +
       "</td>" +
       "</tr>" +
-      renderDetailRow(row, idx)
+      renderDetailRow(idx)
     );
   }
 
@@ -864,7 +933,7 @@
       artifactLinks(row.buildid, types) +
       "</td>" +
       "</tr>" +
-      renderDetailRow(row, idx)
+      renderDetailRow(idx)
     );
   }
 
@@ -894,8 +963,16 @@
     if (!append) {
       lastResultRows = rows.slice();
       expandedRowIdx = null;
+      detailCache.clear();
     } else {
-      lastResultRows = lastResultRows.concat(rows);
+      const room = MAX_RESULT_ROWS - lastResultRows.length;
+      if (room <= 0) {
+        searchStatus.textContent =
+          "Показано максимум " + formatNumber(MAX_RESULT_ROWS) + " строк — уточните запрос";
+        loadMoreBtn.hidden = true;
+        return;
+      }
+      lastResultRows = lastResultRows.concat(rows.slice(0, room));
     }
 
     const totalShown = lastResultRows.length;
@@ -931,7 +1008,8 @@
 
     resultsTable.hidden = false;
     nextOffset = data.next_offset || 0;
-    loadMoreBtn.hidden = data.complete || !nextOffset;
+    loadMoreBtn.hidden =
+      data.complete || !nextOffset || lastResultRows.length >= MAX_RESULT_ROWS;
   }
 
   mainTabs.forEach(function (btn) {
@@ -967,11 +1045,17 @@
     clearTimeout(debounce);
     debounce = setTimeout(function () {
       doSearch(searchInput.value.trim(), false);
-    }, 350);
+    }, 600);
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      loadStats();
+    }
   });
 
   loadStats();
-  setInterval(loadStats, 30000);
+  scheduleStatsPoll();
   setMainTab("dashboard");
-  doSearch("", false);
+  clearSearchResults("Нажмите «Найти» для обзора первых 50 результатов");
 })();

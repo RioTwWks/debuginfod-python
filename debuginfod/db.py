@@ -78,6 +78,7 @@ class MetadataResult:
     storage_kind: str = ""
     content_hash: str = ""
     compression_ratio: float = 1.0
+    mtime_ns: int = 0
 
 
 class Database(ScanHistoryMixin, DedupDbMixin):
@@ -507,7 +508,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         if not normalized:
             rows = self._execute(
                 """
-                SELECT build_id, type, file_path, build_id_kind, raw_build_id
+                SELECT build_id, type, file_path, build_id_kind, raw_build_id, mtime_ns
                 FROM artifacts
                 ORDER BY build_id
                 LIMIT ?
@@ -518,7 +519,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             pattern = normalized + "%"
             rows = self._execute(
                 """
-                SELECT build_id, type, file_path, build_id_kind, raw_build_id
+                SELECT build_id, type, file_path, build_id_kind, raw_build_id, mtime_ns
                 FROM artifacts
                 WHERE build_id LIKE ? OR lower(raw_build_id) LIKE ?
                 ORDER BY build_id
@@ -534,9 +535,42 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                 file=row["file_path"],
                 buildid_kind=row["build_id_kind"] or "",
                 raw_buildid=row["raw_build_id"] or "",
+                mtime_ns=int(row["mtime_ns"] or 0),
             )
             for row in rows
         ]
+
+    def list_artifacts_for_buildid(self, build_id: str) -> list[ArtifactRecord]:
+        rows = self._execute(
+            """
+            SELECT build_id, type, file_path, archive_path, member_path,
+                   build_id_kind, raw_build_id, mtime_ns
+            FROM artifacts
+            WHERE build_id = ?
+            ORDER BY type, file_path
+            """,
+            (build_id,),
+        ).fetchall()
+        return [
+            ArtifactRecord(
+                build_id=row["build_id"],
+                artifact_type=row["type"],
+                file_path=row["file_path"] or "",
+                archive_path=row["archive_path"] or "",
+                member_path=row["member_path"] or "",
+                build_id_kind=row["build_id_kind"] or "gnu",
+                raw_build_id=row["raw_build_id"] or "",
+                mtime_ns=int(row["mtime_ns"] or 0),
+            )
+            for row in rows
+        ]
+
+    def count_sources_for_buildid(self, build_id: str) -> int:
+        row = self._execute(
+            "SELECT COUNT(*) FROM sources WHERE build_id = ?",
+            (build_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def list_artifact_records(self) -> list[ArtifactRecord]:
         rows = self._execute(
@@ -562,6 +596,55 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                 )
             )
         return out
+
+    def list_artifact_records_page(
+        self,
+        offset: int,
+        limit: int,
+        *,
+        path_substring: str | None = None,
+        path_glob: str | None = None,
+    ) -> tuple[list[ArtifactRecord], bool]:
+        """Return a page of artifacts; bool is True when more rows exist."""
+        offset = max(0, offset)
+        limit = max(1, min(limit, 200))
+        fetch = limit + 1
+        params: list[Any] = []
+        where = ""
+        if path_glob:
+            where = "WHERE file_path GLOB ?"
+            params.append(path_glob)
+        elif path_substring:
+            where = "WHERE file_path LIKE ? ESCAPE '\\'"
+            params.append(f"%{path_substring.replace('%', '\\%').replace('_', '\\_')}%")
+        rows = self._execute(
+            f"""
+            SELECT build_id, type, file_path, archive_path, member_path,
+                   build_id_kind, raw_build_id, mtime_ns
+            FROM artifacts
+            {where}
+            ORDER BY file_path, type
+            LIMIT ? OFFSET ?
+            """,
+            (*params, fetch, offset),
+        ).fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        out: list[ArtifactRecord] = []
+        for row in page_rows:
+            out.append(
+                ArtifactRecord(
+                    build_id=row["build_id"],
+                    artifact_type=row["type"],
+                    file_path=row["file_path"] or "",
+                    archive_path=row["archive_path"] or "",
+                    member_path=row["member_path"] or "",
+                    build_id_kind=row["build_id_kind"] or "gnu",
+                    raw_build_id=row["raw_build_id"] or "",
+                    mtime_ns=int(row["mtime_ns"] or 0),
+                )
+            )
+        return out, has_more
 
     def artifact_mtime_map(self) -> dict[tuple[str, str], int]:
         rows = self._execute(
