@@ -616,7 +616,8 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             params.append(path_glob)
         elif path_substring:
             where = "WHERE file_path LIKE ? ESCAPE '\\'"
-            params.append(f"%{path_substring.replace('%', '\\%').replace('_', '\\_')}%")
+            escaped = path_substring.replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
         rows = self._execute(
             f"""
             SELECT build_id, type, file_path, archive_path, member_path,
