@@ -18,6 +18,7 @@ DEFAULT_MAX_SYSTEM_RAM_USED_PCT = 65
 DEFAULT_MAX_RSS_RAM_PCT = 35
 DECOMPRESS_PEAK_MIN_MULTIPLIER = 20.0
 SOFT_RSS_RATIO = 0.70
+SCAN_WORKER_ESTIMATE_BYTES = 512 * 1024 * 1024
 SCAN_JOB_PEAK_FACTOR = 1.5
 SUBPROCESS_POLL_SEC = 0.05
 RECOVERY_STABLE_POLLS = 3
@@ -311,24 +312,25 @@ class MemoryGovernor:
         """Swap growth since governor start (ignores pre-existing system swap)."""
         return max(0, usage.system_swap_bytes - self._baseline_system_swap)
 
-    def _over_limit(self, usage: MemoryUsage) -> str | None:
+    def _over_limit(self, usage: MemoryUsage, *, for_scan: bool = False) -> str | None:
         limits = self.limits
         if limits.max_system_ram_used_bytes > 0:
             used = system_ram_used_bytes(usage)
             if used >= limits.max_system_ram_used_bytes:
                 return "system_ram"
-        if limits.max_rss_bytes > 0:
-            soft = int(limits.max_rss_bytes * SOFT_RSS_RATIO)
-            if usage.rss_bytes >= limits.max_rss_bytes:
-                return "rss"
-            if usage.rss_bytes >= soft:
-                return "rss_soft"
-        if limits.max_swap_bytes > 0:
-            if usage.swap_bytes >= limits.max_swap_bytes:
-                return "tree_swap"
-            delta = self.system_swap_delta_bytes(usage)
-            if delta >= limits.max_swap_bytes:
-                return "swap_delta"
+        if not for_scan:
+            if limits.max_rss_bytes > 0:
+                soft = int(limits.max_rss_bytes * SOFT_RSS_RATIO)
+                if usage.rss_bytes >= limits.max_rss_bytes:
+                    return "rss"
+                if usage.rss_bytes >= soft:
+                    return "rss_soft"
+            if limits.max_swap_bytes > 0:
+                if usage.swap_bytes >= limits.max_swap_bytes:
+                    return "tree_swap"
+                delta = self.system_swap_delta_bytes(usage)
+                if delta >= limits.max_swap_bytes:
+                    return "swap_delta"
         if (
             limits.min_mem_available_bytes > 0
             and usage.mem_available_bytes < limits.min_mem_available_bytes
@@ -336,8 +338,17 @@ class MemoryGovernor:
             return "mem_available"
         return None
 
-    def wait_for_headroom(self, stop_event: object | None = None) -> bool:
-        """Block until under limits. Returns False if stop_event is set."""
+    def wait_for_headroom(
+        self,
+        stop_event: object | None = None,
+        *,
+        for_scan: bool = False,
+    ) -> bool:
+        """Block until under limits. Returns False if stop_event is set.
+
+        Scan phase uses ``for_scan=True``: only system RAM and mem_available are
+        checked. Process-tree RSS/swap limits apply to dedup and subprocess work.
+        """
         if not self.limits.enabled:
             return True
 
@@ -346,7 +357,7 @@ class MemoryGovernor:
                 return False
 
             usage = process_tree_usage(self.root_pid)
-            reason = self._over_limit(usage)
+            reason = self._over_limit(usage, for_scan=for_scan)
             if reason is None:
                 return True
 
@@ -531,10 +542,12 @@ class MemoryGovernor:
         headroom = usage.mem_available_bytes
         if self.limits.min_mem_available_bytes > 0:
             headroom -= self.limits.min_mem_available_bytes
-        if headroom <= 0:
-            return 1
-        per_worker = 256 * 1024 * 1024
-        return max(1, min(workers, headroom // per_worker))
+        by_available = max(1, headroom // SCAN_WORKER_ESTIMATE_BYTES) if headroom > 0 else 1
+        by_rss = workers
+        if self.limits.max_rss_bytes > 0:
+            soft = int(self.limits.max_rss_bytes * SOFT_RSS_RATIO)
+            by_rss = max(1, soft // SCAN_WORKER_ESTIMATE_BYTES)
+        return max(1, min(workers, by_available, by_rss))
 
     def _release_budget(self, peak_bytes: int) -> None:
         with self._lock:

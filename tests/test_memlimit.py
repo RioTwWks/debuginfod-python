@@ -182,6 +182,50 @@ def test_effective_workers_reduces_for_large_files() -> None:
         memlimit.process_tree_usage = original
 
 
+def test_scan_headroom_ignores_rss_soft() -> None:
+    limits = MemoryLimits(max_rss_bytes=1000, min_mem_available_bytes=100)
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+    usage = MemoryUsage(rss_bytes=750, swap_bytes=0, mem_available_bytes=10**9)
+    assert governor._over_limit(usage) == "rss_soft"
+    assert governor._over_limit(usage, for_scan=True) is None
+
+    class _Stop:
+        def is_set(self) -> bool:
+            return False
+
+    import debuginfod.memlimit as memlimit
+
+    original = memlimit.process_tree_usage
+    memlimit.process_tree_usage = lambda _root=None: usage  # type: ignore[assignment]
+    try:
+        assert governor.wait_for_headroom(_Stop(), for_scan=True) is True
+    finally:
+        memlimit.process_tree_usage = original
+
+
+def test_effective_scan_workers_caps_by_soft_rss() -> None:
+    limits = MemoryLimits(
+        max_rss_bytes=mb_to_bytes(4771),
+        min_mem_available_bytes=mb_to_bytes(1536),
+    )
+    governor = MemoryGovernor(limits, sleeper=lambda _: None)
+
+    import debuginfod.memlimit as memlimit
+
+    original = memlimit.process_tree_usage
+    memlimit.process_tree_usage = lambda _root=None: MemoryUsage(  # type: ignore[assignment]
+        rss_bytes=0,
+        swap_bytes=0,
+        mem_available_bytes=mb_to_bytes(8000),
+    )
+    try:
+        # soft RSS ~3340 MiB / 512 MiB per worker -> 6 workers max
+        assert governor.effective_scan_workers(8) == 6
+        assert governor.effective_scan_workers(4) == 4
+    finally:
+        memlimit.process_tree_usage = original
+
+
 def test_wait_respects_stop() -> None:
     limits = MemoryLimits(max_rss_bytes=1)
     governor = MemoryGovernor(limits, sleeper=lambda _: None)
