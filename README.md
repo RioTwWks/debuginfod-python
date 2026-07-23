@@ -84,6 +84,16 @@ DEBUGINFOD_OBJCOPY_PATH=objcopy
 
 **http://localhost:8003/ui/benchmark/** — сравнение Go vs Python.
 
+## Документация
+
+Подробное руководство: [docs/README.md](docs/README.md)
+
+- [Конфигурация](docs/configuration.md) — все переменные `.env`, логирование
+- [Эксплуатация](docs/operations.md) — systemd, логи, мониторинг
+- [Dedup](docs/dedup.md) — пайплайн и интерпретация метрик
+- [Производительность](docs/performance.md) — память, воркеры, UI
+- [Устранение неполадок](docs/troubleshooting.md)
+
 ## Тесты
 
 ```bash

@@ -6,19 +6,20 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from debuginfod.dedup.service import DedupService
+    from debuginfod.dedup_runner import DedupRunner
+    from debuginfod.indexer import ScanStats
 
 logger = logging.getLogger(__name__)
 
 
 class DedupScanHook:
-    def __init__(self, service: DedupService | None) -> None:
-        self.service = service
+    def __init__(self, runner: "DedupRunner | None") -> None:
+        self.runner = runner
 
-    def run_ingest_after_scan(self, stop_event: object | None = None) -> None:
-        if self.service is None or not self.service.enabled():
+    def schedule_ingest_after_scan(self, scan_stats: "ScanStats") -> None:
+        if self.runner is None:
             return
         try:
-            self.service.run_ingest_after_scan(stop_event=stop_event)
+            self.runner.schedule_after_scan(scan_stats)
         except Exception:
-            logger.exception("dedup ingest after scan failed")
+            logger.exception("dedup schedule after scan failed")

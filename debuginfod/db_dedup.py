@@ -106,6 +106,21 @@ class DedupProjectTotals:
     saved_percent: float = 0.0
 
 
+def _empty_dedup_totals() -> dict[str, Any]:
+    return {
+        "files_done": 0,
+        "files_base": 0,
+        "files_delta": 0,
+        "files_full": 0,
+        "files_compressed": 0,
+        "files_cas_ref": 0,
+        "bytes_original": 0,
+        "bytes_on_disk": 0,
+        "bytes_saved": 0,
+        "saved_percent": 0.0,
+    }
+
+
 class DedupDbMixin:
     """Mixin for Database — dedup CRUD."""
 
@@ -391,41 +406,49 @@ class DedupDbMixin:
         }
 
     def dedup_storage_totals(self) -> dict[str, Any]:
-        rows = self._execute(
+        row = self._execute(
             """
-            SELECT storage_kind, file_path, delta_path, original_size, compressed_size, status
+            SELECT
+                SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS files_done,
+                SUM(CASE WHEN status = 'done' AND storage_kind = 'base' THEN 1 ELSE 0 END) AS files_base,
+                SUM(CASE WHEN status = 'done' AND storage_kind = 'delta' THEN 1 ELSE 0 END) AS files_delta,
+                SUM(CASE WHEN status = 'done' AND storage_kind = 'full' THEN 1 ELSE 0 END) AS files_full,
+                SUM(CASE WHEN status = 'done' THEN original_size ELSE 0 END) AS bytes_original,
+                SUM(
+                    CASE WHEN status = 'done' THEN
+                        CASE
+                            WHEN storage_kind = 'delta' THEN
+                                CASE WHEN compressed_size > 0 THEN compressed_size ELSE 0 END
+                            WHEN storage_kind IN ('base', 'full') THEN
+                                CASE
+                                    WHEN compressed_size > 0 THEN compressed_size
+                                    WHEN original_size > 0 THEN original_size
+                                    ELSE 0
+                                END
+                            ELSE 0
+                        END
+                    ELSE 0
+                END) AS bytes_on_disk
             FROM dedup_files
             """
-        ).fetchall()
-        files_done = files_base = files_delta = files_full = 0
-        bytes_original = bytes_on_disk = 0
-        for row in rows:
-            if isinstance(row, dict):
-                kind = str(row["storage_kind"] or "")
-                status = str(row["status"] or "")
-                file_path = str(row["file_path"] or "")
-                delta_path = str(row["delta_path"] or "")
-                orig = int(row["original_size"] or 0)
-                comp = int(row["compressed_size"] or 0)
-            else:
-                kind = str(row[0] or "")
-                file_path = str(row[1] or "")
-                delta_path = str(row[2] or "")
-                orig = int(row[3] or 0)
-                comp = int(row[4] or 0)
-                status = str(row[5] or "")
+        ).fetchone()
+        if row is None:
+            return _empty_dedup_totals()
 
-            if status != "done":
-                continue
-            files_done += 1
-            bytes_original += orig
-            if kind == "base":
-                files_base += 1
-            elif kind == "delta":
-                files_delta += 1
-            elif kind == "full":
-                files_full += 1
-            bytes_on_disk += _dedup_file_bytes_on_disk(kind, file_path, delta_path, orig, comp)
+        if isinstance(row, dict):
+            files_done = int(row.get("files_done") or 0)
+            files_base = int(row.get("files_base") or 0)
+            files_delta = int(row.get("files_delta") or 0)
+            files_full = int(row.get("files_full") or 0)
+            bytes_original = int(row.get("bytes_original") or 0)
+            bytes_on_disk = int(row.get("bytes_on_disk") or 0)
+        else:
+            files_done = int(row[0] or 0)
+            files_base = int(row[1] or 0)
+            files_delta = int(row[2] or 0)
+            files_full = int(row[3] or 0)
+            bytes_original = int(row[4] or 0)
+            bytes_on_disk = int(row[5] or 0)
 
         bytes_saved = max(0, bytes_original - bytes_on_disk)
         saved_percent = (bytes_saved / bytes_original * 100.0) if bytes_original else 0.0
@@ -466,57 +489,69 @@ class DedupDbMixin:
         else:
             build_dirs = int(build_dirs_row[0])
 
-        file_rows = self._execute(
+        row = self._execute(
             """
-            SELECT f.storage_kind, f.file_path, f.delta_path, f.original_size, f.compressed_size, f.status
+            SELECT
+                SUM(CASE WHEN f.status = 'done' THEN 1 ELSE 0 END) AS files_done,
+                SUM(CASE WHEN f.status = 'done' AND f.storage_kind = 'base' THEN 1 ELSE 0 END) AS files_base,
+                SUM(CASE WHEN f.status = 'done' AND f.storage_kind = 'delta' THEN 1 ELSE 0 END) AS files_delta,
+                SUM(CASE WHEN f.status = 'done' AND f.storage_kind = 'full' THEN 1 ELSE 0 END) AS files_full,
+                SUM(CASE WHEN f.status = 'done' THEN f.original_size ELSE 0 END) AS bytes_original,
+                SUM(
+                    CASE WHEN f.status = 'done' THEN
+                        CASE
+                            WHEN f.storage_kind = 'delta' THEN
+                                CASE WHEN f.compressed_size > 0 THEN f.compressed_size ELSE 0 END
+                            WHEN f.storage_kind IN ('base', 'full') THEN
+                                CASE
+                                    WHEN f.compressed_size > 0 THEN f.compressed_size
+                                    WHEN f.original_size > 0 THEN f.original_size
+                                    ELSE 0
+                                END
+                            ELSE 0
+                        END
+                    ELSE 0
+                END) AS bytes_on_disk
             FROM dedup_files f
             JOIN dedup_build_dirs b ON b.id = f.build_dir_id
             JOIN dedup_projects p ON p.id = b.project_id
             WHERE p.name = ?
             """,
             (project_name,),
-        ).fetchall()
+        ).fetchone()
 
-        files_done = files_base = files_delta = files_full = 0
-        bytes_original = bytes_on_disk = 0
-        for row in file_rows:
-            if isinstance(row, dict):
-                kind = str(row["storage_kind"] or "")
-                status = str(row["status"] or "")
-                file_path = str(row["file_path"] or "")
-                delta_path = str(row["delta_path"] or "")
-                orig = int(row["original_size"] or 0)
-                comp = int(row["compressed_size"] or 0)
-            else:
-                kind, file_path, delta_path, orig, comp, status = row
-                kind = str(kind or "")
-                status = str(status or "")
-                file_path = str(file_path or "")
-                delta_path = str(delta_path or "")
-                orig = int(orig or 0)
-                comp = int(comp or 0)
+        if row is None:
+            totals = _empty_dedup_totals()
+        elif isinstance(row, dict):
+            totals = {
+                "files_done": int(row.get("files_done") or 0),
+                "files_base": int(row.get("files_base") or 0),
+                "files_delta": int(row.get("files_delta") or 0),
+                "files_full": int(row.get("files_full") or 0),
+                "bytes_original": int(row.get("bytes_original") or 0),
+                "bytes_on_disk": int(row.get("bytes_on_disk") or 0),
+            }
+        else:
+            totals = {
+                "files_done": int(row[0] or 0),
+                "files_base": int(row[1] or 0),
+                "files_delta": int(row[2] or 0),
+                "files_full": int(row[3] or 0),
+                "bytes_original": int(row[4] or 0),
+                "bytes_on_disk": int(row[5] or 0),
+            }
 
-            if status != "done":
-                continue
-            files_done += 1
-            bytes_original += orig
-            if kind == "base":
-                files_base += 1
-            elif kind == "delta":
-                files_delta += 1
-            elif kind == "full":
-                files_full += 1
-            bytes_on_disk += _dedup_file_bytes_on_disk(kind, file_path, delta_path, orig, comp)
-
+        bytes_original = totals["bytes_original"]
+        bytes_on_disk = totals["bytes_on_disk"]
         bytes_saved = max(0, bytes_original - bytes_on_disk)
         saved_percent = (bytes_saved / bytes_original * 100.0) if bytes_original else 0.0
         return {
             "project": project_name,
             "build_dirs": build_dirs,
-            "files_done": files_done,
-            "files_base": files_base,
-            "files_delta": files_delta,
-            "files_full": files_full,
+            "files_done": totals["files_done"],
+            "files_base": totals["files_base"],
+            "files_delta": totals["files_delta"],
+            "files_full": totals["files_full"],
             "bytes_original": bytes_original,
             "bytes_on_disk": bytes_on_disk,
             "bytes_saved": bytes_saved,

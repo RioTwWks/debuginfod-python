@@ -84,10 +84,28 @@ class DedupService:
     def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str:
         return restore_to_cache(self.db, self._restore_opts, cache_dir, file_path)
 
-    def run_ingest_after_scan(self, stop_event: object | None = None) -> BackfillResult:
+    def run_ingest_after_scan(
+        self,
+        stop_event: object | None = None,
+        *,
+        scan_indexed: int = -1,
+    ) -> BackfillResult:
         started = datetime.now(timezone.utc)
-        result = run_ingest_all(self._pipeline_opts(stop_event=stop_event))
-        self._record_run(started, result)
+        result = run_ingest_all(
+            self._pipeline_opts(stop_event=stop_event),
+            scan_indexed=scan_indexed,
+        )
+        if result.files_registered == 0 and not result.dedup_status and not result.groups_processed:
+            status = self.db.count_dedup_files_by_status()
+            result.dedup_status = status
+        skipped = (
+            scan_indexed == 0
+            and result.files_registered == 0
+            and result.groups_processed == 0
+            and result.files_compressed == 0
+        )
+        if not skipped:
+            self._record_run(started, result)
         logger.info(
             "dedup ingest: discovered=%d compressed_deltas=%d groups=%d errors=%d "
             "pending=%d error_files=%d done=%d bytes_before=%d bytes_after=%d",

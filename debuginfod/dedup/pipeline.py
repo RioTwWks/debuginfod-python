@@ -136,18 +136,30 @@ def expand_dedup_groups_with_bases(
     return expanded
 
 
-def run_ingest_all(opts: PipelineOptions) -> BackfillResult:
+def run_ingest_all(opts: PipelineOptions, *, scan_indexed: int = -1) -> BackfillResult:
     result = BackfillResult(dry_run=opts.dry_run)
-    n, err = _safe_discover(opts)
-    result.files_registered = n
-    if err:
-        result.errors += 1
-        return result
 
     if not opts.dry_run:
         reset = opts.db.reset_transient_dedup_errors()
         if reset:
             logger.info("Reset %d dedup file(s) with transient memory errors to pending", reset)
+
+    status = opts.db.count_dedup_files_by_status()
+    pending = int(status.get("pending", 0))
+    errors = int(status.get("error", 0))
+
+    if scan_indexed == 0 and pending == 0 and errors == 0:
+        logger.info(
+            "Skipping dedup ingest (no pending/error files, scan indexed 0; discover skipped)"
+        )
+        result.dedup_status = status
+        return result
+
+    n, err = _safe_discover(opts)
+    result.files_registered = n
+    if err:
+        result.errors += 1
+        return result
 
     files = opts.db.list_all_pending_dedup_files()
     if opts.projects:

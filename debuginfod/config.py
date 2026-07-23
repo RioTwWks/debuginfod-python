@@ -22,6 +22,7 @@ class Settings:
     dwz_path: str
     objcopy_path: str
     log_level: str
+    log_dir: str = ""
     host: str = "0.0.0.0"
     metadata_maxtime_sec: float = 5.0
     metadata_page_size: int = 100
@@ -105,6 +106,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         dwz_path=os.getenv("DEBUGINFOD_DWZ_PATH", "dwz"),
         objcopy_path=os.getenv("DEBUGINFOD_OBJCOPY_PATH", "objcopy"),
         log_level=os.getenv("DEBUGINFOD_LOG_LEVEL", "info").lower(),
+        log_dir=os.getenv("DEBUGINFOD_LOG_DIR", "").strip(),
         host=os.getenv("DEBUGINFOD_HOST", "0.0.0.0"),
         metadata_maxtime_sec=_env_float("DEBUGINFOD_METADATA_MAXTIME", 5.0),
         metadata_page_size=_env_int("DEBUGINFOD_METADATA_PAGE_SIZE", 100),
