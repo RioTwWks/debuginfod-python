@@ -100,6 +100,7 @@ class BackfillResult:
     bytes_before: int = 0
     bytes_after: int = 0
     dry_run: bool = False
+    dedup_status: dict[str, int] = field(default_factory=dict)
 
 
 def group_key(record: DedupFileRecord) -> str:
@@ -169,6 +170,26 @@ def run_ingest_all(opts: PipelineOptions) -> BackfillResult:
     result.errors = errors
     result.bytes_before = b_before
     result.bytes_after = b_after
+
+    if not opts.dry_run:
+        status = opts.db.count_dedup_files_by_status()
+        result.dedup_status = status
+        pending = int(status.get("pending", 0))
+        errors = int(status.get("error", 0))
+        if pending or errors:
+            logger.warning(
+                "dedup incomplete: pending=%d error=%d done=%d",
+                pending,
+                errors,
+                int(status.get("done", 0)),
+            )
+        else:
+            logger.info(
+                "dedup complete: done=%d groups=%d compressed_deltas=%d",
+                int(status.get("done", 0)),
+                result.groups_processed,
+                result.files_compressed,
+            )
 
     if not opts.dry_run:
         seen: set[int] = set()

@@ -89,10 +89,15 @@ class DedupService:
         result = run_ingest_all(self._pipeline_opts(stop_event=stop_event))
         self._record_run(started, result)
         logger.info(
-            "dedup ingest: registered=%d compressed=%d errors=%d bytes_before=%d bytes_after=%d",
+            "dedup ingest: discovered=%d compressed_deltas=%d groups=%d errors=%d "
+            "pending=%d error_files=%d done=%d bytes_before=%d bytes_after=%d",
             result.files_registered,
             result.files_compressed,
+            result.groups_processed,
             result.errors,
+            int(result.dedup_status.get("pending", 0)),
+            int(result.dedup_status.get("error", 0)),
+            int(result.dedup_status.get("done", 0)),
             result.bytes_before,
             result.bytes_after,
         )
