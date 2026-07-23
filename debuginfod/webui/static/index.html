@@ -33,10 +33,6 @@
         <span id="uptime" class="mast-uptime">uptime —</span>
       </div>
 
-      <div class="mast-snapshot" id="mast-snapshot" aria-live="polite">
-        <div class="mast-tile mast-tile-loading"><span class="mast-tile-label">Загрузка…</span></div>
-      </div>
-
       <nav class="mast-nav" role="tablist" aria-label="Разделы">
         <button type="button" class="main-tab active" data-tab="dashboard" role="tab" aria-selected="true">
           <span class="mast-nav-icon" aria-hidden="true">
@@ -44,7 +40,7 @@
           </span>
           <span class="mast-nav-text">
             <span class="mast-nav-label">Дашборд</span>
-            <span class="mast-nav-desc">метрики и дерево .debug</span>
+            <span class="mast-nav-desc">дерево .debug файлов</span>
           </span>
         </button>
         <button type="button" class="main-tab" data-tab="scans" role="tab" aria-selected="false">
@@ -58,15 +54,17 @@
         </button>
       </nav>
 
-      <section class="mast-scan-card" aria-label="Последнее сканирование">
-        <h2 class="mast-section-label">Последний scan</h2>
-        <div class="mast-scan-grid" id="mast-scan-info">
-          <span class="mast-scan-item"><strong>—</strong><span>индекс</span></span>
-          <span class="mast-scan-item"><strong>—</strong><span>пропуск</span></span>
-          <span class="mast-scan-item"><strong>—</strong><span>ошибки</span></span>
-          <span class="mast-scan-item"><strong>—</strong><span>время</span></span>
+      <section class="mast-metrics" aria-live="polite">
+        <h2 class="mast-section-label">Метрики индекса</h2>
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card loading"><span class="stat-label">Загрузка…</span></div>
         </div>
-        <p class="mast-scan-time" id="mast-scan-time"></p>
+      </section>
+
+      <section class="mast-scan-card" aria-label="Последнее сканирование">
+        <h2 class="mast-section-label">Последнее сканирование</h2>
+        <div class="scan-row" id="scan-info">—</div>
+        <p class="mast-scan-note">«Пропущено» — без изменений с прошлого прохода или ELF без GNU build-id.</p>
       </section>
 
       <div class="mast-actions">
@@ -99,16 +97,6 @@
 
     <div class="stage-shell">
       <div id="tab-dashboard" class="tab-panel active" role="tabpanel">
-        <header class="hud" aria-live="polite">
-          <section class="hud-metrics" id="stats-grid">
-            <div class="stat-card loading"><span class="stat-label">Загрузка…</span></div>
-          </section>
-          <aside class="hud-scan">
-            <p class="hud-scan-label">Последнее сканирование</p>
-            <div class="scan-row" id="scan-info">—</div>
-          </aside>
-        </header>
-
         <section class="explorer" aria-label="Файлы .debug">
           <header class="explorer-toolbar">
             <div class="explorer-heading">

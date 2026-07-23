@@ -17,9 +17,6 @@
   const dedupRunsBody = document.getElementById("dedup-runs-body");
   const rescanBtn = document.getElementById("rescan-btn");
   const rescanStatus = document.getElementById("rescan-status");
-  const mastSnapshot = document.getElementById("mast-snapshot");
-  const mastScanInfo = document.getElementById("mast-scan-info");
-  const mastScanTime = document.getElementById("mast-scan-time");
   const mastScanBadge = document.getElementById("mast-scan-badge");
   const mastDedupBadge = document.getElementById("mast-dedup-badge");
 
@@ -305,16 +302,14 @@
       const data = await res.json();
       renderStats(data);
     } catch (err) {
-      statsGrid.innerHTML =
-        '<div class="stat-card loading"><span class="stat-label">Ошибка загрузки статистики</span></div>';
-      if (mastSnapshot) {
-        mastSnapshot.innerHTML =
-          '<div class="mast-tile mast-tile-loading"><span class="mast-tile-label">Ошибка загрузки</span></div>';
+      if (statsGrid) {
+        statsGrid.innerHTML =
+          '<div class="stat-card loading"><span class="stat-label">Ошибка загрузки статистики</span></div>';
       }
     }
   }
 
-  function renderMastSidebar(data) {
+  function renderMastBadges(data) {
     if (mastScanBadge) {
       mastScanBadge.textContent = data.scan_enabled ? "scan on" : "scan off";
       mastScanBadge.className =
@@ -325,84 +320,11 @@
       mastDedupBadge.className =
         "mast-badge " + (data.dedup_enabled ? "mast-badge-on" : "mast-badge-off");
     }
-
-    if (mastSnapshot) {
-      const dedupValue = data.dedup_enabled
-        ? formatBytes(data.dedup_bytes_saved || 0)
-        : "off";
-      const tiles = [
-        {
-          label: "Артефакты",
-          value: formatNumber(data.artifacts_total),
-          accent: true,
-        },
-        {
-          label: "Debuginfo",
-          value: formatNumber(data.artifacts_debuginfo),
-        },
-        {
-          label: "На диске",
-          value: formatBytes(data.index_bytes_on_disk || 0),
-        },
-        { label: "Dedup saved", value: dedupValue },
-      ];
-      mastSnapshot.innerHTML = tiles
-        .map(function (t) {
-          const cls = t.accent ? "mast-tile mast-tile-accent" : "mast-tile";
-          return (
-            '<div class="' +
-            cls +
-            '"><span class="mast-tile-value">' +
-            escapeHtml(String(t.value)) +
-            '</span><span class="mast-tile-label">' +
-            escapeHtml(t.label) +
-            "</span></div>"
-          );
-        })
-        .join("");
-    }
-
-    if (mastScanInfo) {
-      mastScanInfo.innerHTML = [
-        {
-          value: formatNumber(data.last_scan_indexed),
-          label: "индекс",
-        },
-        {
-          value: formatNumber(data.last_scan_skipped),
-          label: "пропуск",
-        },
-        {
-          value: formatNumber(data.last_scan_errors),
-          label: "ошибки",
-        },
-        {
-          value: formatMs(data.last_scan_duration_ms),
-          label: "время",
-        },
-      ]
-        .map(function (item) {
-          return (
-            '<span class="mast-scan-item"><strong>' +
-            escapeHtml(String(item.value)) +
-            "</strong><span>" +
-            escapeHtml(item.label) +
-            "</span></span>"
-          );
-        })
-        .join("");
-    }
-
-    if (mastScanTime) {
-      mastScanTime.textContent = data.last_scan_finished_at
-        ? "завершено " + data.last_scan_finished_at
-        : "";
-    }
   }
 
   function renderStats(data) {
     uptimeEl.textContent = "uptime " + formatDuration(data.uptime_seconds);
-    renderMastSidebar(data);
+    renderMastBadges(data);
 
     let dedupValue;
     let dedupLabel = "Экономия dedup";
@@ -432,22 +354,24 @@
       { label: "Кэш", value: formatBytes(data.cache_bytes) },
     ];
 
-    statsGrid.innerHTML = cards
-      .map(function (c) {
-        const cls = c.highlight ? "stat-card highlight" : "stat-card";
-        const val =
-          typeof c.value === "number" ? formatNumber(c.value) : c.value;
-        return (
-          '<div class="' +
-          cls +
-          '"><span class="stat-value">' +
-          escapeHtml(String(val)) +
-          '</span><span class="stat-label">' +
-          escapeHtml(c.label) +
-          "</span></div>"
-        );
-      })
-      .join("");
+    if (statsGrid) {
+      statsGrid.innerHTML = cards
+        .map(function (c) {
+          const cls = c.highlight ? "stat-card highlight" : "stat-card";
+          const val =
+            typeof c.value === "number" ? formatNumber(c.value) : c.value;
+          return (
+            '<div class="' +
+            cls +
+            '"><span class="stat-value">' +
+            escapeHtml(String(val)) +
+            '</span><span class="stat-label">' +
+            escapeHtml(c.label) +
+            "</span></div>"
+          );
+        })
+        .join("");
+    }
 
     const scanParts = [
       "<span class='scan-item'><strong>" +
@@ -471,7 +395,9 @@
           "</strong> <span>завершено</span></span>"
       );
     }
-    scanInfo.innerHTML = scanParts.join("");
+    if (scanInfo) {
+      scanInfo.innerHTML = scanParts.join("");
+    }
 
     if (data.last_scan_finished_at) {
       lastScanFinishedAt = data.last_scan_finished_at;
