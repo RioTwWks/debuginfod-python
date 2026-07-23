@@ -24,11 +24,39 @@
 
       <div class="mast-meta">
         <span class="mast-title">benchmark</span>
-        <a href="/ui/" class="mast-back">← дашборд</a>
+        <p class="mast-tagline">Сравнение debuginfod-go и debuginfod-python</p>
+        <a href="/ui/" class="mast-back">← вернуться на дашборд</a>
       </div>
 
+      <section class="mast-info-card">
+        <h2 class="mast-section-label">Что измеряем</h2>
+        <ul class="mast-info-list">
+          <li>латентность <code>GET /buildid/…/executable</code></li>
+          <li>объём blob-хранилища Python</li>
+          <li>сжатие xdelta3 vs полные ELF</li>
+        </ul>
+      </section>
+
+      <nav class="mast-nav mast-nav-static" aria-label="Навигация">
+        <a href="/ui/" class="mast-nav-link">
+          <span class="mast-nav-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M10 19l-7-7 7-7M3 12h18" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="mast-nav-text">
+            <span class="mast-nav-label">Дашборд</span>
+            <span class="mast-nav-desc">индекс и файлы .debug</span>
+          </span>
+        </a>
+      </nav>
+
       <div class="mast-actions">
-        <a class="mast-btn mast-btn-ghost" href="/stats" target="_blank" rel="noopener">stats API</a>
+        <a class="mast-btn mast-btn-ghost" href="/stats" target="_blank" rel="noopener">Открыть /stats API</a>
+
+        <div class="mast-quicklinks" aria-label="Быстрые ссылки">
+          <a href="/ui/" class="mast-quicklink">дашборд</a>
+          <a href="/healthz" class="mast-quicklink" target="_blank" rel="noopener">healthz</a>
+        </div>
+
         <div class="mast-tools">
           <button type="button" class="icon-btn theme-toggle" aria-label="Переключить тему" aria-pressed="true" title="Светлая тема">
             <svg class="theme-icon theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -39,6 +67,7 @@
               <path d="M12 2.75v2.5M12 18.75v2.5M4.22 4.22l1.77 1.77M18.01 18.01l1.77 1.77M2.75 12h2.5M18.75 12h2.5M4.22 19.78l1.77-1.77M18.01 5.99l1.77-1.77" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
             </svg>
           </button>
+          <span class="mast-tools-label">тема</span>
         </div>
       </div>
     </aside>
