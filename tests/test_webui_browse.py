@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from debuginfod.db import Database
+from debuginfod.db import Database, ArtifactRecord
 from debuginfod.dedup.discover import discover
 from debuginfod.indexer import Indexer
 from debuginfod.metrics import MetricsCollector
@@ -68,6 +68,39 @@ def test_build_ui_tree_no_commit_uses_directories() -> None:
     assert tree[1].group == "project"
     assert tree[1].path == "Released/ProjA"
     assert tree[1].children
+
+
+def test_ui_api_browse_corrupt_elf(tmp_path: Path) -> None:
+    """Browse must not 500 when an indexed file is not a valid ELF."""
+    db = Database(tmp_path / "corrupt-browse.sqlite")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    scan_root = tmp_path / "scan"
+    build_dir = scan_root / "Released" / "ProjA" / "build_1"
+    build_dir.mkdir(parents=True)
+    corrupt = build_dir / "broken.so.debug"
+    corrupt.write_bytes(b"\x7fELF" + b"\x00" * 500)
+
+    db.upsert_artifact(
+        ArtifactRecord(
+            build_id="cafebabe",
+            artifact_type="debuginfo",
+            file_path=str(corrupt.resolve()),
+            mtime_ns=1,
+        )
+    )
+
+    app = create_app(
+        db=db,
+        scan_runner=None,
+        cache_dir=cache_dir,
+        ui_enabled=True,
+        scan_paths=[scan_root],
+    )
+    client = TestClient(app)
+
+    assert client.get("/ui/api/browse").status_code == 200
+    assert client.get("/ui/api/browse?q=broken").status_code == 200
 
 
 @pytest.fixture

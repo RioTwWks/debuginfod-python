@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from elftools.common.exceptions import ELFError
 from elftools.elf.elffile import ELFFile
 
 _FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -16,7 +17,10 @@ _GIT_TAG_RE = re.compile(r"^(?:v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?|release[-_][\w.-]
 
 
 def from_bytes(data: bytes) -> str:
-    elffile = ELFFile(BytesIO(data))
+    try:
+        elffile = ELFFile(BytesIO(data))
+    except ELFError as exc:
+        raise ValueError("invalid ELF") from exc
     section = elffile.get_section_by_name(".comment")
     if section is None:
         return ""
@@ -36,7 +40,7 @@ def from_path_or_empty(path: str | Path) -> str:
     """Return git commit from ELF .comment or empty string on failure."""
     try:
         return from_path(path)
-    except (ValueError, OSError):
+    except (ValueError, OSError, ELFError):
         return ""
 
 
@@ -44,15 +48,25 @@ def info_from_path(path: str | Path) -> dict[str, Any] | None:
     """Parse .comment into UI fields (debuginfod-go/pkg/elfcomment.InfoFromPath)."""
     try:
         data = Path(path).read_bytes()
-    except OSError:
+        elffile = ELFFile(BytesIO(data))
+    except (OSError, ELFError):
         return None
-    lines = _split_comment_lines(data)
+
+    section = elffile.get_section_by_name(".comment")
+    if section is None:
+        return None
+    raw = section.data()
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(raw)
+    lines = [line.strip() for line in text.split("\x00") if line.strip()]
     if not lines:
         return None
 
     info: dict[str, Any] = {"lines": lines}
     try:
-        info["git_commit"] = from_bytes(data)
+        info["git_commit"] = _extract_tag(text)
     except ValueError:
         pass
 
