@@ -81,6 +81,7 @@ def create_app(
     benchmark_go_admin_key: str = "",
     benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
+    zabbix_key: str = "",
     lifespan=None,
 ) -> FastAPI:
     app = FastAPI(title="debuginfod-python", version="0.2.0", lifespan=lifespan)
@@ -114,6 +115,36 @@ def create_app(
     async def stats() -> JSONResponse:
         """Storage statistics for comparison with debuginfod-go."""
         return JSONResponse(db.get_stats())
+
+    @app.get("/zabbix")
+    async def zabbix(request: Request) -> JSONResponse:
+        if zabbix_key:
+            token = request.headers.get("X-Zabbix-Token") or request.query_params.get("key", "")
+            if token != zabbix_key:
+                raise HTTPException(status_code=401, detail="unauthorized")
+        counts = db.count_stats()
+        scan = collector.last_scan()
+        payload: dict[str, Any] = {
+            "uptime_seconds": collector.uptime_seconds(),
+            "artifacts_total": counts.artifacts_total,
+            "artifacts_executable": counts.artifacts_executable,
+            "artifacts_debuginfo": counts.artifacts_debuginfo,
+            "sources_total": counts.sources_total,
+            "scanned_files_total": counts.scanned_files_total,
+            "last_scan_duration_ms": scan.duration_ms,
+            "last_scan_indexed": scan.indexed,
+            "last_scan_skipped": scan.skipped,
+            "last_scan_errors": scan.errors,
+            "http_requests_total": collector.http_requests(),
+            "cache_bytes": sum(
+                f.stat().st_size
+                for f in cache_root.rglob("*")
+                if f.is_file()
+            )
+            if cache_root.exists()
+            else 0,
+        }
+        return JSONResponse(payload)
 
     @app.post("/admin/rescan")
     async def admin_rescan(request: Request) -> JSONResponse:
@@ -263,6 +294,7 @@ def create_app(
             benchmark_go_admin_key=benchmark_go_admin_key,
             benchmark_py_admin_key=benchmark_py_admin_key,
             scan_paths=scan_paths,
+            dedup_restorer=dedup_restorer,
         )
 
     return app

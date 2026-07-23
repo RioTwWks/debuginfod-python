@@ -10,7 +10,7 @@
   <header class="header">
     <div class="header-inner">
       <h1>debuginfod-python</h1>
-      <p class="subtitle">Статистика индекса и поиск артефактов</p>
+      <p class="subtitle">Статистика индекса и обзор .debug файлов</p>
     </div>
     <div class="header-meta">
       <span id="uptime" class="badge">uptime —</span>
@@ -19,7 +19,7 @@
       </button>
       <span id="rescan-status" class="badge rescan-status" hidden></span>
       <a class="badge link" href="/healthz" target="_blank" rel="noopener">healthz</a>
-      <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
+      <a class="badge link" href="/zabbix" target="_blank" rel="noopener">zabbix</a>
     </div>
   </header>
 
@@ -41,41 +41,20 @@
       </section>
 
       <section class="panel">
-        <h2>Поиск артефактов</h2>
-        <div class="search-mode" role="tablist" aria-label="Режим поиска">
-          <button type="button" class="mode-btn active" data-key="path" role="tab" aria-selected="true">путь</button>
-          <button type="button" class="mode-btn" data-key="name" role="tab" aria-selected="false">имя файла</button>
-          <button type="button" class="mode-btn" data-key="buildid" role="tab" aria-selected="false">build-id</button>
-        </div>
+        <h2>Файлы .debug</h2>
         <form id="search-form" class="search-form">
           <input
             type="search"
             id="search-input"
             name="q"
-            placeholder="Released/Quik* или build_*/*.debug"
+            placeholder="Путь, имя файла или commit id…"
             autocomplete="off"
             spellcheck="false"
           >
-          <button type="submit">Найти</button>
         </form>
-        <p class="hint" id="search-hint">Путь относительно SCAN_PATH. Пустой запрос — первые 50 файлов. Подстрока или fnmatch (* ?).</p>
+        <p class="hint" id="search-hint">Поиск по относительному пути (от SCAN_PATH), имени <code>*.debug</code> и git commit. Подстрока или маска <code>*</code> <code>?</code>. Результаты обновляются при вводе.</p>
         <div id="search-status" class="search-status"></div>
-        <div class="table-wrap">
-          <table class="results-table" id="results-table" hidden>
-            <thead>
-              <tr>
-                <th class="col-toggle"></th>
-                <th>каталог</th>
-                <th>файл</th>
-                <th>тип</th>
-                <th>build-id</th>
-                <th>скачать</th>
-              </tr>
-            </thead>
-            <tbody id="results-body"></tbody>
-          </table>
-        </div>
-        <button type="button" id="load-more" class="load-more" hidden>Ещё результаты</button>
+        <div id="browse-tree" class="browse-tree" hidden></div>
       </section>
     </div>
 

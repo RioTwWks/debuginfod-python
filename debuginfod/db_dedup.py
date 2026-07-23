@@ -177,6 +177,22 @@ class DedupDbMixin:
         row = self._execute("SELECT id FROM dedup_files WHERE file_path = ?", (record.file_path,)).fetchone()
         return int(row["id"] if isinstance(row, dict) else row[0])
 
+    def list_dedup_files_for_browse(self) -> list[DedupFileRecord]:
+        rows = self._execute(
+            """
+            SELECT f.id, f.build_dir_id, p.name AS project_name, f.file_path, f.filename,
+                f.file_stem, f.version, f.file_build_num, f.commit_tag,
+                f.storage_kind, f.base_file_id, f.delta_path, f.sha256,
+                f.original_size, f.compressed_size, f.status, f.error_msg
+            FROM dedup_files f
+            JOIN dedup_build_dirs b ON b.id = f.build_dir_id
+            JOIN dedup_projects p ON p.id = b.project_id
+            WHERE f.status != 'error'
+            ORDER BY f.file_path
+            """
+        ).fetchall()
+        return [self._row_to_dedup_file(r) for r in rows]
+
     def list_all_pending_dedup_files(self) -> list[DedupFileRecord]:
         rows = self._execute(
             """

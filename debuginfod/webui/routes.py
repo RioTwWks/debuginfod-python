@@ -9,14 +9,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
 from debuginfod.benchmark import discover_binaries, resolve_testdata_path, run_benchmark
 from debuginfod.benchmark_store import BenchmarkStore
 from debuginfod.db import Database, MetadataResult
+from debuginfod.webui.browse import browse_for_ui
 from debuginfod.webui.search import (
     artifact_detail_for_ui,
     enrich_flat_results,
@@ -85,6 +86,7 @@ def register_webui(
     benchmark_go_admin_key: str = "",
     benchmark_py_admin_key: str = "",
     scan_paths: list[Path] | None = None,
+    dedup_restorer: object | None = None,
 ) -> None:
     """Mount /ui dashboard routes on the FastAPI app."""
     router = APIRouter()
@@ -124,10 +126,6 @@ def register_webui(
             "dedup_totals": db.dedup_storage_totals() if dedup_enabled else {},
             "dedup_by_project": db.dedup_totals_by_project() if dedup_enabled else [],
             "dedup_enabled": dedup_enabled,
-            "dedup_in_progress": (
-                bool(getattr(scan_runner, "dedup_in_progress", False)) if scan_runner else False
-            ),
-            "scan_in_progress": bool(getattr(scan_runner, "scanning", False)) if scan_runner else False,
         }
         scans_cache["payload"] = payload
         scans_cache["expires_at"] = now + SCANS_CACHE_TTL_SEC
@@ -261,6 +259,39 @@ def register_webui(
             "batches": db.list_batches(project_name),
         }
 
+    @router.get("/ui/api/browse", include_in_schema=False)
+    async def ui_browse(
+        q: str = Query(""),
+        limit: int = Query(0, ge=0, le=50000),
+    ) -> dict[str, Any]:
+        roots = scan_paths or []
+        return await asyncio.to_thread(browse_for_ui, db, roots, q.strip(), limit)
+
+    @router.get("/ui/api/download/dedup/{dedup_id}", include_in_schema=False)
+    async def ui_download_dedup(dedup_id: int) -> FileResponse:
+        record = db.get_dedup_file_by_id(dedup_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="not found")
+        file_path = record.file_path
+        if dedup_restorer is not None:
+            try:
+                file_path = dedup_restorer.restore_to_cache(cache_dir, record.file_path)  # type: ignore[attr-defined]
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="not found") from exc
+            except Exception as exc:
+                logger.exception("dedup restore failed for id=%d", dedup_id)
+                raise HTTPException(status_code=500, detail="restore failed") from exc
+        path = Path(file_path)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        safe_name = record.filename.replace('"', "")
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=record.filename,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+
     @router.get("/ui/api/stats", include_in_schema=False)
     async def ui_stats() -> dict[str, Any]:
         return await asyncio.to_thread(_cached_stats_payload)
@@ -278,19 +309,16 @@ def register_webui(
         return await asyncio.to_thread(_cached_scans_payload, limit)
 
     @router.post("/ui/api/rescan", include_in_schema=False)
-    async def ui_rescan() -> dict[str, Any]:
-        if scan_runner is None or not scan_enabled:
-            raise HTTPException(status_code=503, detail="scan disabled")
-        if getattr(scan_runner, "scanning", False):
-            return {"status": "already_running"}
-        stats = await asyncio.to_thread(scan_runner.run_once)
-        return {
-            "status": "ok",
-            "indexed": stats.files_indexed,
-            "skipped": stats.files_skipped,
-            "errors": stats.errors,
-            "cancelled": stats.cancelled,
-        }
+    async def ui_rescan() -> dict[str, str]:
+        if not scan_enabled:
+            raise HTTPException(status_code=409, detail="scan disabled")
+        if scan_runner is None:
+            raise HTTPException(status_code=503, detail="scan trigger unavailable")
+        trigger = getattr(scan_runner, "trigger", None)
+        if trigger is None:
+            raise HTTPException(status_code=503, detail="scan trigger unavailable")
+        await asyncio.to_thread(trigger)
+        return {"status": "accepted"}
 
     @router.get("/ui/api/search", include_in_schema=False)
     async def ui_search(
@@ -310,6 +338,7 @@ def register_webui(
                 q,
                 limit,
                 roots,
+                include_details=True,
             )
             return {
                 "key": mode,
@@ -381,6 +410,8 @@ def register_webui(
                     for record in results
                 ],
                 roots,
+                with_comment=True,
+                source_limit=20,
             )
             payload = {
                 "key": mode,

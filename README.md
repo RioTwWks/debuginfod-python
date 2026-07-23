@@ -80,9 +80,14 @@ DEBUGINFOD_OBJCOPY_PATH=objcopy
 
 ## Web UI
 
-**http://localhost:8003/ui/** — дашборд, поиск, проекты dedup.
+**http://localhost:8003/ui/** — дашборд с деревом `.debug` файлов, история scan/dedup.
 
-**http://localhost:8003/ui/benchmark/** — сравнение Go vs Python.
+- Единый поиск по пути, имени файла и git commit (обновление при вводе)
+- Дерево проектов → `build_*` → скачивание
+- Dedup-файлы без build-id: `/ui/api/download/dedup/{id}`
+- Мониторинг: `GET /zabbix` (опционально `DEBUGINFOD_ZABBIX_KEY`)
+
+**http://localhost:8003/ui/benchmark/** — сравнение Go vs Python (расширение Python).
 
 ## Документация
 
