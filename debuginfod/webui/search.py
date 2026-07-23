@@ -22,6 +22,7 @@ class UIArtifactRow:
     file_path: str = ""
     buildid_kind: str = ""
     raw_buildid: str = ""
+    git_commit: str = ""
     relative_path: str = ""
     filename: str = ""
     directory: str = ""
@@ -121,6 +122,7 @@ def _row_from_record(record: ArtifactRecord) -> UIArtifactRow:
         file_path=record.file_path,
         buildid_kind=record.build_id_kind,
         raw_buildid=record.raw_build_id,
+        git_commit=record.git_commit,
         mtime_ns=record.mtime_ns,
     )
 

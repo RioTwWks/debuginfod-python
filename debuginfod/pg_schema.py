@@ -82,11 +82,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     raw_build_id TEXT NOT NULL DEFAULT '',
     family_key TEXT NOT NULL DEFAULT '',
     base_build_id TEXT NOT NULL DEFAULT '',
+    git_commit TEXT NOT NULL DEFAULT '',
     mtime_ns BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (build_id, type)
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_build_id ON artifacts(build_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_family ON artifacts(family_key);
+CREATE INDEX IF NOT EXISTS idx_artifacts_git_commit ON artifacts(git_commit);
 CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_name);
 
 CREATE TABLE IF NOT EXISTS sources (

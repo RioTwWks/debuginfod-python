@@ -13,7 +13,53 @@ from debuginfod.dedup.discover import discover
 from debuginfod.indexer import Indexer
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
+from debuginfod.webui.browse import (
+    UI_NO_COMMIT_LABEL,
+    UITreeFile,
+    build_ui_tree_from_files,
+    ui_commit_label,
+)
 from debuginfod.webapi import create_app
+
+
+def test_build_ui_tree_groups_by_commit() -> None:
+    commit_a = "9ae10425c6bbb99c7ee1f71a3941fd7aee058227"
+    commit_b = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    files = [
+        UITreeFile(
+            filename="libfoo.so.debug",
+            relative_path="Released/ProjA/build_1/sub/libfoo.so.debug",
+            git_commit=commit_a,
+        ),
+        UITreeFile(
+            filename="libbar.so.debug",
+            relative_path="Released/ProjA/build_2/libbar.so.debug",
+            git_commit=commit_a,
+        ),
+        UITreeFile(
+            filename="x.debug",
+            relative_path="Unsorted/Other/build_1/x.debug",
+            git_commit=commit_b,
+        ),
+    ]
+    tree = build_ui_tree_from_files(files)
+    assert len(tree) == 2
+    assert tree[0].path == commit_a
+    assert len(tree[0].files) == 2
+    assert tree[1].path == commit_b
+    assert len(tree[1].files) == 1
+
+
+def test_build_ui_tree_no_commit_bucket_last() -> None:
+    files = [
+        UITreeFile(filename="a.debug", relative_path="p/a.debug"),
+        UITreeFile(filename="b.debug", relative_path="p/b.debug", git_commit="abc123"),
+    ]
+    tree = build_ui_tree_from_files(files)
+    assert len(tree) == 2
+    assert tree[0].path == "abc123"
+    assert tree[1].path == UI_NO_COMMIT_LABEL
+    assert ui_commit_label(UI_NO_COMMIT_LABEL) == UI_NO_COMMIT_LABEL
 
 
 @pytest.fixture
@@ -65,7 +111,7 @@ def test_ui_api_browse(browse_client: TestClient) -> None:
     data = resp.json()
     assert data["count"] >= 1
     assert data["projects"]
-    assert data["projects"][0]["name"] == "Released/ProjA"
+    assert data["projects"][0]["name"] in {UI_NO_COMMIT_LABEL, ui_commit_label(UI_NO_COMMIT_LABEL)}
 
 
 def test_ui_api_rescan_accepted(browse_client: TestClient) -> None:

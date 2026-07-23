@@ -10,6 +10,7 @@ from elftools.elf.elffile import ELFFile
 
 from debuginfod import buildid
 from debuginfod.db import ArtifactRecord, SourceRecord
+from debuginfod.elfcomment import from_path_or_empty
 
 _DWARF_MAX_BYTES = int(os.getenv("DEBUGINFOD_SCAN_DWARF_MAX_MB", "128")) * 1024 * 1024
 
@@ -53,12 +54,17 @@ def process_elf_path(path_str: str) -> IndexWorkerResult:
         result.error = str(exc)
         return result
 
+    git_commit = ""
+    if artifact_type_name == "debuginfo":
+        git_commit = from_path_or_empty(path)
+
     result.artifact = ArtifactRecord(
         build_id=bid.value,
         artifact_type=artifact_type_name,
         file_path=str(path.resolve()),
         build_id_kind=bid.kind,
         raw_build_id=bid.raw,
+        git_commit=git_commit,
         mtime_ns=mtime_ns,
     )
     try:
