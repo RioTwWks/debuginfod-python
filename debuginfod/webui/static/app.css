@@ -629,18 +629,18 @@ body {
   flex-direction: column;
 }
 
-.tab-panel.active {
+.tab-panel:not(.active) {
+  display: none !important;
+}
+
+.tab-panel.active:not(.tab-panel-scroll) {
   display: flex;
 }
 
-.tab-panel-scroll {
+.tab-panel.tab-panel-scroll.active {
   display: block;
   overflow-y: auto;
   padding: 1.75rem 2rem 1rem;
-}
-
-.tab-panel-scroll.active {
-  display: block;
 }
 
 .page-title {
