@@ -171,6 +171,7 @@ def main(argv: list[str] | None = None) -> None:
         benchmark_go_admin_key=settings.benchmark_go_admin_key,
         benchmark_py_admin_key=settings.benchmark_py_admin_key,
         scan_paths=settings.scan_paths,
+        zabbix_key=settings.zabbix_key,
         lifespan=lifespan,
     )
 

@@ -50,8 +50,8 @@ def test_ui_index(ui_client: TestClient) -> None:
     resp = ui_client.get("/ui/")
     assert resp.status_code == 200
     assert "debuginfod-python" in resp.text
-    assert 'data-key="path"' in resp.text
-    assert "col-toggle" in resp.text
+    assert "Файлы .debug" in resp.text
+    assert 'id="browse-tree"' in resp.text
 
 
 def test_ui_redirect(ui_client: TestClient) -> None:

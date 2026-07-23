@@ -398,7 +398,7 @@ def search_path_for_ui(
         else:
             page_records, has_more = db.list_artifact_records_page(offset, limit)
         rows = [_row_from_record(record) for record in page_records]
-        enriched = enrich_flat_results(db, rows, scan_roots)
+        enriched = enrich_flat_results(db, rows, scan_roots, with_comment=True, source_limit=20)
         next_offset = offset + len(page_records)
         return enriched, not has_more, next_offset if has_more else 0
 
@@ -411,7 +411,7 @@ def search_path_for_ui(
     page = matches[offset : offset + limit] if limit > 0 else matches[offset:]
     next_offset = offset + len(page)
     complete = next_offset >= len(matches)
-    enriched = enrich_flat_results(db, page, scan_roots)
+    enriched = enrich_flat_results(db, page, scan_roots, with_comment=True, source_limit=20)
     return enriched, complete, next_offset if not complete else 0
 
 
@@ -431,5 +431,5 @@ def search_name_for_ui(
     page = matches[offset : offset + limit] if limit > 0 else matches[offset:]
     next_offset = offset + len(page)
     complete = next_offset >= len(matches)
-    enriched = enrich_flat_results(db, page, scan_roots)
+    enriched = enrich_flat_results(db, page, scan_roots, with_comment=True, source_limit=20)
     return enriched, complete, next_offset if not complete else 0

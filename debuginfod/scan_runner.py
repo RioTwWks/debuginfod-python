@@ -83,6 +83,16 @@ class ScanRunner:
             self._indexer.request_stop()
         logger.info("Scan stop requested")
 
+    def trigger(self) -> None:
+        """Request out-of-band scan (non-blocking, Go ScanTrigger parity)."""
+        if self._stop.is_set():
+            return
+        with self._lock:
+            if self._scanning:
+                logger.info("Scan already in progress, skipping trigger")
+                return
+        threading.Thread(target=self.run_once, daemon=True, name="scan-trigger").start()
+
     def run_once(self) -> ScanStats:
         if self._stop.is_set():
             return ScanStats(cancelled=True)
