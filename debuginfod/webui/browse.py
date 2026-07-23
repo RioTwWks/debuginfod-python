@@ -20,6 +20,15 @@ from debuginfod.webui.search import (
 UI_NO_COMMIT_LABEL = "(no commit)"
 
 
+def file_git_commit(file: UITreeFile) -> str:
+    if commit := file.git_commit.strip():
+        return commit
+    if file.comment:
+        if commit := str(file.comment.get("git_commit") or "").strip():
+            return commit
+    return ""
+
+
 @dataclass
 class UITreeFile:
     filename: str
@@ -59,9 +68,12 @@ class UITreeNode:
     path: str
     files: list[UITreeFile] = field(default_factory=list)
     children: list["UITreeNode"] = field(default_factory=list)
+    group: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"name": self.name, "path": self.path}
+        if self.group:
+            payload["group"] = self.group
         if self.files:
             payload["files"] = [f.to_dict() for f in self.files]
         if self.children:
@@ -78,17 +90,10 @@ def ui_project_from_relative_path(rel: str) -> str:
 
 
 def ui_commit_key(file: UITreeFile) -> str:
-    if commit := file.git_commit.strip():
-        return commit
-    if file.comment:
-        if commit := str(file.comment.get("git_commit") or "").strip():
-            return commit
-    return UI_NO_COMMIT_LABEL
+    return file_git_commit(file)
 
 
 def ui_commit_label(commit: str) -> str:
-    if commit == UI_NO_COMMIT_LABEL:
-        return commit
     if len(commit) > 16:
         return commit[:12] + "…"
     return commit
@@ -263,22 +268,100 @@ def _search_dedup_files_for_ui(
 
 
 def build_ui_tree_from_files(files: list[UITreeFile]) -> list[UITreeNode]:
-    commits: dict[str, list[UITreeFile]] = {}
+    with_commit: list[UITreeFile] = []
+    without_commit: list[UITreeFile] = []
     for file in files:
-        key = ui_commit_key(file)
+        if file_git_commit(file):
+            with_commit.append(file)
+        else:
+            without_commit.append(file)
+
+    out: list[UITreeNode] = []
+
+    commits: dict[str, list[UITreeFile]] = {}
+    for file in with_commit:
+        key = file_git_commit(file)
         commits.setdefault(key, []).append(file)
 
-    names = sorted(commits, key=lambda name: (name == UI_NO_COMMIT_LABEL, name))
-    out: list[UITreeNode] = []
-    for commit in names:
+    for commit in sorted(commits):
         out.append(
             UITreeNode(
                 name=ui_commit_label(commit),
                 path=commit,
+                group="commit",
                 files=_sort_ui_tree_files_by_path(commits[commit]),
             )
         )
+
+    out.extend(build_ui_tree_from_directories(without_commit))
     return out
+
+
+@dataclass
+class _TreeNode:
+    children: dict[str, "_TreeNode"] = field(default_factory=dict)
+    files: list[UITreeFile] = field(default_factory=list)
+
+
+def build_ui_tree_from_directories(files: list[UITreeFile]) -> list[UITreeNode]:
+    projects: dict[str, dict[str, list[UITreeFile]]] = {}
+
+    for file in files:
+        project = file.project or ui_project_from_relative_path(file.relative_path)
+        rest = file.relative_path
+        if rest.startswith(project):
+            rest = rest[len(project) :].lstrip("/")
+        dir_path = str(Path(rest).parent)
+        if dir_path == ".":
+            dir_path = ""
+        projects.setdefault(project, {}).setdefault(dir_path, []).append(file)
+
+    out: list[UITreeNode] = []
+    for pname in sorted(projects):
+        root = UITreeNode(name=pname, path=pname, group="project")
+        root.children, root.files = _build_dir_children(pname, projects[pname])
+        out.append(root)
+    return out
+
+
+def _build_dir_children(
+    project: str,
+    dirs: dict[str, list[UITreeFile]],
+) -> tuple[list[UITreeNode], list[UITreeFile]]:
+    if not dirs:
+        return [], []
+
+    root = _TreeNode()
+    for dir_path, dir_files in dirs.items():
+        parts = dir_path.split("/") if dir_path else []
+        cur = root
+        for part in parts:
+            cur = cur.children.setdefault(part, _TreeNode())
+        cur.files.extend(dir_files)
+
+    return _tree_node_to_ui(project, root), _sort_ui_tree_files(root.files)
+
+
+def _tree_node_to_ui(base: str, node: _TreeNode) -> list[UITreeNode]:
+    out: list[UITreeNode] = []
+    for name in sorted(node.children):
+        child = node.children[name]
+        path = f"{base}/{name}"
+        out.append(
+            UITreeNode(
+                name=name,
+                path=path,
+                files=_sort_ui_tree_files(child.files),
+                children=_tree_node_to_ui(path, child),
+            )
+        )
+    return out
+
+
+def _sort_ui_tree_files(files: list[UITreeFile]) -> list[UITreeFile]:
+    if not files:
+        return []
+    return sorted(files, key=lambda f: f.filename)
 
 
 def _sort_ui_tree_files_by_path(files: list[UITreeFile]) -> list[UITreeFile]:

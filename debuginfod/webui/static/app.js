@@ -212,11 +212,12 @@
 
     const nodeClass =
       "tree-node" +
-      (depth === 0 ? " tree-commit" : "") +
+      (depth === 0 && node.group === "commit" ? " tree-commit" : "") +
+      (depth === 0 && node.group === "project" ? " tree-project" : "") +
       (children.length === 0 && files.length > 0 && depth > 0 ? " tree-leaf-dir" : "");
     const openAttr = expandAll ? " open" : "";
     const summaryTitle =
-      depth === 0 && node.path && node.path !== node.name
+      depth === 0 && node.group === "commit" && node.path && node.path !== node.name
         ? ' title="' + escapeHtml(node.path) + '"'
         : "";
 
