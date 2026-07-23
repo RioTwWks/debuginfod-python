@@ -426,6 +426,10 @@ def register_webui(
 
         raise HTTPException(status_code=400, detail=f"unsupported search key: {mode}")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        return FileResponse(STATIC_DIR / "debuginfo_ico.png", media_type="image/png")
+
     app.include_router(router)
     app.mount(
         "/ui/static",
