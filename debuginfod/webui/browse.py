@@ -142,14 +142,14 @@ def _artifact_abs_path(row: UIArtifactRow) -> str:
     return row.file_path or row.file or ""
 
 
-def _resolve_git_commit(row: UIArtifactRow) -> str:
+def _resolve_git_commit(row: UIArtifactRow, *, elf_fallback: bool = False) -> str:
     if row.git_commit:
         return row.git_commit
     if row.comment:
         commit = str(row.comment.get("git_commit") or "").strip()
         if commit:
             return commit
-    if row.archive_path or not row.file_path:
+    if not elf_fallback or row.archive_path or not row.file_path:
         return ""
     return from_path_or_empty(row.file_path)
 
@@ -163,7 +163,11 @@ def artifact_record_to_ui_tree_file(
 ) -> UITreeFile:
     enrich_artifact_row(row, scan_roots, with_comment=enrich_comment)
     rel = row.relative_path or artifact_display_path(row, scan_roots)
-    git_commit = _resolve_git_commit(row) if resolve_commit else row.git_commit
+    git_commit = (
+        _resolve_git_commit(row, elf_fallback=enrich_comment)
+        if resolve_commit
+        else row.git_commit
+    )
     return UITreeFile(
         filename=row.filename or Path(row.file).name,
         relative_path=rel,
