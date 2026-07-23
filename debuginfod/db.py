@@ -36,6 +36,7 @@ class ArtifactRecord:
     member_path: str = ""
     build_id_kind: str = "gnu"
     raw_build_id: str = ""
+    git_commit: str = ""
     mtime_ns: int = 0
     # legacy blob fields (optional)
     content_hash: str = ""
@@ -220,7 +221,18 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                 self._conn.execute(sql)
         self._migrate_scan_history()
         self._migrate_dedup()
+        self._ensure_postgres_artifact_columns()
         self._conn.commit()
+
+    def _ensure_postgres_artifact_columns(self) -> None:
+        if self._dialect != "postgresql":
+            return
+        self._execute(
+            "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS git_commit TEXT NOT NULL DEFAULT ''"
+        )
+        self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_git_commit ON artifacts(git_commit)"
+        )
 
     def _ensure_artifact_columns(self) -> None:
         if self._dialect == "postgresql":
@@ -235,10 +247,15 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             "storage_kind": "TEXT NOT NULL DEFAULT ''",
             "family_key": "TEXT NOT NULL DEFAULT ''",
             "base_build_id": "TEXT NOT NULL DEFAULT ''",
+            "git_commit": "TEXT NOT NULL DEFAULT ''",
         }
         for column, typedef in additions.items():
             if column not in existing:
                 self._execute(f"ALTER TABLE artifacts ADD COLUMN {column} {typedef}")
+        if "git_commit" in existing or "git_commit" in additions:
+            self._execute(
+                "CREATE INDEX IF NOT EXISTS idx_artifacts_git_commit ON artifacts(git_commit)"
+            )
 
     def _ensure_source_columns(self) -> None:
         if self._dialect == "postgresql":
@@ -331,15 +348,16 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             """
             INSERT INTO artifacts (
                 build_id, type, file_path, archive_path, member_path,
-                build_id_kind, raw_build_id, mtime_ns,
+                build_id_kind, raw_build_id, git_commit, mtime_ns,
                 content_hash, storage_kind, family_key, base_build_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(build_id, type) DO UPDATE SET
                 file_path = excluded.file_path,
                 archive_path = excluded.archive_path,
                 member_path = excluded.member_path,
                 build_id_kind = excluded.build_id_kind,
                 raw_build_id = excluded.raw_build_id,
+                git_commit = excluded.git_commit,
                 mtime_ns = excluded.mtime_ns,
                 content_hash = excluded.content_hash,
                 storage_kind = excluded.storage_kind,
@@ -355,6 +373,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                 record.member_path,
                 record.build_id_kind,
                 record.raw_build_id,
+                record.git_commit,
                 record.mtime_ns,
                 record.content_hash,
                 record.storage_kind,
@@ -428,6 +447,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             member_path=row["member_path"] if "member_path" in keys else "",
             build_id_kind=row["build_id_kind"],
             raw_build_id=row["raw_build_id"],
+            git_commit=row["git_commit"] if "git_commit" in keys else "",
             mtime_ns=row["mtime_ns"],
             content_hash=row["content_hash"] if "content_hash" in keys else "",
             storage_kind=row["storage_kind"] if "storage_kind" in keys else "",
@@ -546,7 +566,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         rows = self._execute(
             """
             SELECT build_id, type, file_path, archive_path, member_path,
-                   build_id_kind, raw_build_id, mtime_ns
+                   build_id_kind, raw_build_id, git_commit, mtime_ns
             FROM artifacts
             WHERE build_id = ?
             ORDER BY type, file_path
@@ -562,6 +582,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                 member_path=row["member_path"] or "",
                 build_id_kind=row["build_id_kind"] or "gnu",
                 raw_build_id=row["raw_build_id"] or "",
+                git_commit=(row["git_commit"] or "") if "git_commit" in row.keys() else "",
                 mtime_ns=int(row["mtime_ns"] or 0),
             )
             for row in rows
@@ -578,7 +599,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         rows = self._execute(
             """
             SELECT build_id, type, file_path, archive_path, member_path,
-                   build_id_kind, raw_build_id, mtime_ns
+                   build_id_kind, raw_build_id, git_commit, mtime_ns
             FROM artifacts
             ORDER BY file_path, type
             """
@@ -594,6 +615,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                     member_path=row["member_path"] or "",
                     build_id_kind=row["build_id_kind"] or "gnu",
                     raw_build_id=row["raw_build_id"] or "",
+                    git_commit=(row["git_commit"] or "") if "git_commit" in row.keys() else "",
                     mtime_ns=int(row["mtime_ns"] or 0),
                 )
             )
@@ -623,7 +645,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         rows = self._execute(
             f"""
             SELECT build_id, type, file_path, archive_path, member_path,
-                   build_id_kind, raw_build_id, mtime_ns
+                   build_id_kind, raw_build_id, git_commit, mtime_ns
             FROM artifacts
             {where}
             ORDER BY file_path, type
@@ -644,6 +666,7 @@ class Database(ScanHistoryMixin, DedupDbMixin):
                     member_path=row["member_path"] or "",
                     build_id_kind=row["build_id_kind"] or "gnu",
                     raw_build_id=row["raw_build_id"] or "",
+                    git_commit=(row["git_commit"] or "") if "git_commit" in row.keys() else "",
                     mtime_ns=int(row["mtime_ns"] or 0),
                 )
             )

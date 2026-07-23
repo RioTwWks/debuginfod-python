@@ -212,13 +212,17 @@
 
     const nodeClass =
       "tree-node" +
-      (depth === 0 ? " tree-project" : "") +
+      (depth === 0 ? " tree-commit" : "") +
       (children.length === 0 && files.length > 0 && depth > 0 ? " tree-leaf-dir" : "");
     const openAttr = expandAll ? " open" : "";
+    const summaryTitle =
+      depth === 0 && node.path && node.path !== node.name
+        ? ' title="' + escapeHtml(node.path) + '"'
+        : "";
 
     if (children.length === 0 && files.length > 0 && depth > 0) {
       let html = '<details class="' + nodeClass + '"' + openAttr + ">";
-      html += "<summary>" + label + "</summary>";
+      html += "<summary" + summaryTitle + ">" + label + "</summary>";
       html += '<div class="tree-files">';
       files.forEach(function (f) {
         html += renderFileRow(f);
@@ -228,7 +232,7 @@
     }
 
     let html = '<details class="' + nodeClass + '"' + openAttr + ">";
-    html += "<summary>" + label + "</summary>";
+    html += "<summary" + summaryTitle + ">" + label + "</summary>";
     html += '<div class="tree-body">';
 
     if (files.length) {

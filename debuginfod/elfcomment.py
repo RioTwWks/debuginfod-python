@@ -32,6 +32,14 @@ def from_path(path: str | Path) -> str:
     return from_bytes(Path(path).read_bytes())
 
 
+def from_path_or_empty(path: str | Path) -> str:
+    """Return git commit from ELF .comment or empty string on failure."""
+    try:
+        return from_path(path)
+    except (ValueError, OSError):
+        return ""
+
+
 def info_from_path(path: str | Path) -> dict[str, Any] | None:
     """Parse .comment into UI fields (debuginfod-go/pkg/elfcomment.InfoFromPath)."""
     try:
