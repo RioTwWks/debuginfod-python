@@ -9,142 +9,149 @@
   <link rel="stylesheet" href="/ui/static/app.css">
 </head>
 <body>
-  <header class="header">
-    <div class="header-start">
-      <a href="/ui/" class="header-brand" aria-label="debuginfod-python — дашборд">
+  <div class="console">
+    <aside class="brand-mast" aria-label="Бренд и навигация">
+      <a href="/ui/" class="logo-hero-wrap" aria-label="debuginfod-python — дашборд">
         <img
           src="/ui/static/debuginfo_2x.png"
           alt="debuginfo"
-          class="header-logo"
+          class="logo-hero"
           width="1200"
           height="627"
           decoding="async"
         >
       </a>
-      <p class="header-tagline">benchmark · go vs python</p>
+
+      <div class="mast-meta">
+        <span class="mast-title">benchmark</span>
+        <a href="/ui/" class="mast-back">← дашборд</a>
+      </div>
+
+      <div class="mast-actions">
+        <a class="mast-btn mast-btn-ghost" href="/stats" target="_blank" rel="noopener">stats API</a>
+        <div class="mast-tools">
+          <button type="button" class="icon-btn theme-toggle" aria-label="Переключить тему" aria-pressed="true" title="Светлая тема">
+            <svg class="theme-icon theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M21 14.5A7.5 7.5 0 0 1 9.5 3 6.5 6.5 0 1 0 21 14.5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
+            </svg>
+            <svg class="theme-icon theme-icon-light" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" hidden>
+              <circle cx="12" cy="12" r="4.25" stroke="currentColor" stroke-width="1.75"/>
+              <path d="M12 2.75v2.5M12 18.75v2.5M4.22 4.22l1.77 1.77M18.01 18.01l1.77 1.77M2.75 12h2.5M18.75 12h2.5M4.22 19.78l1.77-1.77M18.01 5.99l1.77-1.77" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="stage-shell">
+      <main class="tab-panel tab-panel-scroll active">
+        <div class="scans-intro">
+          <h1 class="page-title">Benchmark</h1>
+          <p class="page-lead">Сравнение debuginfod-go и debuginfod-python (xdelta3).</p>
+        </div>
+
+        <section class="panel">
+          <h2>Параметры запуска</h2>
+          <form id="bench-form" class="bench-form">
+            <label>
+              <span>Go URL</span>
+              <input type="url" id="go-url" name="go_url" value="http://localhost:8002" required>
+            </label>
+            <label>
+              <span>Python URL</span>
+              <input type="url" id="py-url" name="py_url" value="http://localhost:8003" required>
+            </label>
+            <label>
+              <span>Testdata</span>
+              <input type="text" id="testdata" name="testdata" value="testdata/versions" required>
+            </label>
+            <label>
+              <span>Прогонов</span>
+              <input type="number" id="runs" name="runs" value="3" min="1" max="20" required>
+            </label>
+            <label class="bench-checkbox">
+              <input type="checkbox" id="rescan" name="rescan" checked>
+              <span>Rescan перед тестом (POST /admin/rescan)</span>
+            </label>
+            <label>
+              <span>Go admin key</span>
+              <input type="password" id="go-admin-key" name="go_admin_key" placeholder="DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY" autocomplete="off">
+            </label>
+            <label>
+              <span>Python admin key</span>
+              <input type="password" id="py-admin-key" name="py_admin_key" placeholder="опционально" autocomplete="off">
+            </label>
+            <button type="submit" id="run-btn">Запустить бенчмарк</button>
+          </form>
+          <p class="hint" id="bench-hint">Сравнивает латентность GET /buildid/…/executable и метрики хранения Python.</p>
+          <div id="bench-warnings" class="warnings-panel" hidden></div>
+          <div id="bench-status" class="search-status"></div>
+        </section>
+
+        <section class="hud-metrics hud-metrics-wrap" id="summary-grid" hidden aria-live="polite"></section>
+
+        <section class="panel chart-panel" id="latency-panel" hidden>
+          <h2>Латентность по версиям (среднее, ms)</h2>
+          <div class="chart-wrap">
+            <canvas id="latency-chart" width="900" height="360" role="img" aria-label="График латентности"></canvas>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item go">debuginfod-go</span>
+            <span class="legend-item py">debuginfod-python</span>
+          </div>
+        </section>
+
+        <section class="panel chart-panel" id="storage-panel" hidden>
+          <h2>Использование диска</h2>
+          <div class="chart-wrap">
+            <canvas id="storage-chart" width="900" height="320" role="img" aria-label="График хранения"></canvas>
+          </div>
+          <p class="hint">Go: суммарный размер ELF в testdata. Python: оценка занятого места в blob-хранилище только для testdata (не весь /stats).</p>
+        </section>
+
+        <section class="panel" id="details-panel" hidden>
+          <h2>Детали по бинарникам</h2>
+          <div class="table-wrap">
+            <table class="results-table" id="details-table">
+              <thead>
+                <tr>
+                  <th>версия</th>
+                  <th>build-id</th>
+                  <th>размер</th>
+                  <th>Go ms</th>
+                  <th>Python ms</th>
+                  <th>ratio py/go</th>
+                </tr>
+              </thead>
+              <tbody id="details-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" id="history-panel" hidden>
+          <h2>История запусков</h2>
+          <div class="table-wrap">
+            <table class="results-table" id="history-table">
+              <thead>
+                <tr>
+                  <th>время</th>
+                  <th>бинарников</th>
+                  <th>Go ms</th>
+                  <th>Python ms</th>
+                  <th>сжатие</th>
+                </tr>
+              </thead>
+              <tbody id="history-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <footer class="stage-foot">
+        <span>CLI: <code>python scripts/compare_benchmark.py</code></span>
+      </footer>
     </div>
-    <div class="header-toolbar">
-      <button
-        type="button"
-        class="icon-btn theme-toggle"
-        aria-label="Переключить тему"
-        aria-pressed="true"
-        title="Светлая тема"
-      >
-        <svg class="theme-icon theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M21 14.5A7.5 7.5 0 0 1 9.5 3 6.5 6.5 0 1 0 21 14.5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
-        </svg>
-        <svg class="theme-icon theme-icon-light" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" hidden>
-          <circle cx="12" cy="12" r="4.25" stroke="currentColor" stroke-width="1.75"/>
-          <path d="M12 2.75v2.5M12 18.75v2.5M4.22 4.22l1.77 1.77M18.01 18.01l1.77 1.77M2.75 12h2.5M18.75 12h2.5M4.22 19.78l1.77-1.77M18.01 5.99l1.77-1.77" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <a class="badge link" href="/ui/">дашборд</a>
-      <a class="badge link" href="/stats" target="_blank" rel="noopener">stats</a>
-    </div>
-  </header>
-
-  <main class="container">
-    <section class="panel">
-      <h2>Параметры запуска</h2>
-      <form id="bench-form" class="bench-form">
-        <label>
-          <span>Go URL</span>
-          <input type="url" id="go-url" name="go_url" value="http://localhost:8002" required>
-        </label>
-        <label>
-          <span>Python URL</span>
-          <input type="url" id="py-url" name="py_url" value="http://localhost:8003" required>
-        </label>
-        <label>
-          <span>Testdata</span>
-          <input type="text" id="testdata" name="testdata" value="testdata/versions" required>
-        </label>
-        <label>
-          <span>Прогонов</span>
-          <input type="number" id="runs" name="runs" value="3" min="1" max="20" required>
-        </label>
-        <label class="bench-checkbox">
-          <input type="checkbox" id="rescan" name="rescan" checked>
-          <span>Rescan перед тестом (POST /admin/rescan)</span>
-        </label>
-        <label>
-          <span>Go admin key</span>
-          <input type="password" id="go-admin-key" name="go_admin_key" placeholder="DEBUGINFOD_BENCHMARK_GO_ADMIN_KEY" autocomplete="off">
-        </label>
-        <label>
-          <span>Python admin key</span>
-          <input type="password" id="py-admin-key" name="py_admin_key" placeholder="опционально" autocomplete="off">
-        </label>
-        <button type="submit" id="run-btn">Запустить бенчмарк</button>
-      </form>
-      <p class="hint" id="bench-hint">Сравнивает латентность GET /buildid/…/executable и метрики хранения Python.</p>
-      <div id="bench-warnings" class="warnings-panel" hidden></div>
-      <div id="bench-status" class="search-status"></div>
-    </section>
-
-    <section class="stats-grid" id="summary-grid" hidden aria-live="polite"></section>
-
-    <section class="panel chart-panel" id="latency-panel" hidden>
-      <h2>Латентность по версиям (среднее, ms)</h2>
-      <div class="chart-wrap">
-        <canvas id="latency-chart" width="900" height="360" role="img" aria-label="График латентности"></canvas>
-      </div>
-      <div class="chart-legend">
-        <span class="legend-item go">debuginfod-go</span>
-        <span class="legend-item py">debuginfod-python</span>
-      </div>
-    </section>
-
-    <section class="panel chart-panel" id="storage-panel" hidden>
-      <h2>Использование диска</h2>
-      <div class="chart-wrap">
-        <canvas id="storage-chart" width="900" height="320" role="img" aria-label="График хранения"></canvas>
-      </div>
-      <p class="hint">Go: суммарный размер ELF в testdata. Python: оценка занятого места в blob-хранилище только для testdata (не весь /stats).</p>
-    </section>
-
-    <section class="panel" id="details-panel" hidden>
-      <h2>Детали по бинарникам</h2>
-      <div class="table-wrap">
-        <table class="results-table" id="details-table">
-          <thead>
-            <tr>
-              <th>версия</th>
-              <th>build-id</th>
-              <th>размер</th>
-              <th>Go ms</th>
-              <th>Python ms</th>
-              <th>ratio py/go</th>
-            </tr>
-          </thead>
-          <tbody id="details-body"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel" id="history-panel" hidden>
-      <h2>История запусков</h2>
-      <div class="table-wrap">
-        <table class="results-table" id="history-table">
-          <thead>
-            <tr>
-              <th>время</th>
-              <th>бинарников</th>
-              <th>Go ms</th>
-              <th>Python ms</th>
-              <th>сжатие</th>
-            </tr>
-          </thead>
-          <tbody id="history-body"></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
-
-  <footer class="footer">
-    <span>CLI: <code>python scripts/compare_benchmark.py</code></span>
-  </footer>
+  </div>
 
   <script src="/ui/static/benchmark.js"></script>
 </body>
