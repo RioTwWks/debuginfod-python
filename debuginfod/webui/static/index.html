@@ -24,23 +24,64 @@
 
       <div class="mast-meta">
         <span class="mast-title">debuginfod-python</span>
+        <p class="mast-tagline">Индекс ELF build-id и хранилище <code>*.debug</code></p>
+        <div class="mast-status" id="mast-status" aria-label="Состояние сервиса">
+          <span class="mast-badge mast-badge-live" title="Процесс запущен">● online</span>
+          <span class="mast-badge mast-badge-neutral" id="mast-scan-badge">scan …</span>
+          <span class="mast-badge mast-badge-neutral" id="mast-dedup-badge">dedup …</span>
+        </div>
         <span id="uptime" class="mast-uptime">uptime —</span>
       </div>
 
-      <nav class="pill-nav" role="tablist" aria-label="Разделы">
+      <div class="mast-snapshot" id="mast-snapshot" aria-live="polite">
+        <div class="mast-tile mast-tile-loading"><span class="mast-tile-label">Загрузка…</span></div>
+      </div>
+
+      <nav class="mast-nav" role="tablist" aria-label="Разделы">
         <button type="button" class="main-tab active" data-tab="dashboard" role="tab" aria-selected="true">
-          Дашборд
+          <span class="mast-nav-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.75"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.75"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.75"/></svg>
+          </span>
+          <span class="mast-nav-text">
+            <span class="mast-nav-label">Дашборд</span>
+            <span class="mast-nav-desc">метрики и дерево .debug</span>
+          </span>
         </button>
         <button type="button" class="main-tab" data-tab="scans" role="tab" aria-selected="false">
-          Сканирования
+          <span class="mast-nav-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h10M4 18h14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/><circle cx="18" cy="17" r="3" stroke="currentColor" stroke-width="1.75"/></svg>
+          </span>
+          <span class="mast-nav-text">
+            <span class="mast-nav-label">Сканирования</span>
+            <span class="mast-nav-desc">история, dedup, папки</span>
+          </span>
         </button>
       </nav>
 
+      <section class="mast-scan-card" aria-label="Последнее сканирование">
+        <h2 class="mast-section-label">Последний scan</h2>
+        <div class="mast-scan-grid" id="mast-scan-info">
+          <span class="mast-scan-item"><strong>—</strong><span>индекс</span></span>
+          <span class="mast-scan-item"><strong>—</strong><span>пропуск</span></span>
+          <span class="mast-scan-item"><strong>—</strong><span>ошибки</span></span>
+          <span class="mast-scan-item"><strong>—</strong><span>время</span></span>
+        </div>
+        <p class="mast-scan-time" id="mast-scan-time"></p>
+      </section>
+
       <div class="mast-actions">
         <button type="button" id="rescan-btn" class="mast-btn mast-btn-primary" title="Переиндексировать SCAN_PATH; при включённом dedup — ingest xdelta (decompress-dwz)">
-          Сканировать
+          Сканировать сейчас
         </button>
         <span id="rescan-status" class="mast-hint" hidden></span>
+
+        <div class="mast-quicklinks" aria-label="Быстрые ссылки">
+          <a href="/ui/benchmark/" class="mast-quicklink">benchmark</a>
+          <a href="/stats" class="mast-quicklink" target="_blank" rel="noopener">/stats</a>
+          <a href="/healthz" class="mast-quicklink" target="_blank" rel="noopener">healthz</a>
+          <a href="/zabbix" class="mast-quicklink" target="_blank" rel="noopener">zabbix</a>
+        </div>
+
         <div class="mast-tools">
           <button type="button" class="icon-btn theme-toggle" aria-label="Переключить тему" aria-pressed="true" title="Светлая тема">
             <svg class="theme-icon theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -51,8 +92,7 @@
               <path d="M12 2.75v2.5M12 18.75v2.5M4.22 4.22l1.77 1.77M18.01 18.01l1.77 1.77M2.75 12h2.5M18.75 12h2.5M4.22 19.78l1.77-1.77M18.01 5.99l1.77-1.77" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
             </svg>
           </button>
-          <a href="/healthz" target="_blank" rel="noopener">healthz</a>
-          <a href="/zabbix" target="_blank" rel="noopener">zabbix</a>
+          <span class="mast-tools-label">тема</span>
         </div>
       </div>
     </aside>
