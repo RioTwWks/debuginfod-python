@@ -124,6 +124,10 @@ def register_webui(
             "dedup_totals": db.dedup_storage_totals() if dedup_enabled else {},
             "dedup_by_project": db.dedup_totals_by_project() if dedup_enabled else [],
             "dedup_enabled": dedup_enabled,
+            "dedup_in_progress": (
+                bool(getattr(scan_runner, "dedup_in_progress", False)) if scan_runner else False
+            ),
+            "scan_in_progress": bool(getattr(scan_runner, "scanning", False)) if scan_runner else False,
         }
         scans_cache["payload"] = payload
         scans_cache["expires_at"] = now + SCANS_CACHE_TTL_SEC

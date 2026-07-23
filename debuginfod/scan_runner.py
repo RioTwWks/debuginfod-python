@@ -20,23 +20,37 @@ class ScanRunner:
 
     def __init__(
         self,
-        indexer: Indexer,
+        indexer: Indexer | None,
         interval_sec: int,
         on_complete: Callable[[ScanStats], None] | None = None,
         metrics: MetricsCollector | None = None,
         stop_event: threading.Event | None = None,
+        dedup_runner: object | None = None,
     ) -> None:
-        self.indexer = indexer
         self.interval_sec = interval_sec
         self.on_complete = on_complete
         self.metrics = metrics
+        self.dedup_runner = dedup_runner
         self._stop = stop_event or threading.Event()
-        self.indexer.bind_stop_event(self._stop)
         self._thread: threading.Thread | None = None
         self._ready = False
         self._scanning = False
         self._lock = threading.Lock()
         self._last_stats: ScanStats | None = None
+        self._indexer: Indexer | None = None
+        if indexer is not None:
+            self.indexer = indexer
+
+    @property
+    def indexer(self) -> Indexer:
+        if self._indexer is None:
+            raise RuntimeError("scan runner indexer not configured")
+        return self._indexer
+
+    @indexer.setter
+    def indexer(self, value: Indexer) -> None:
+        self._indexer = value
+        value.bind_stop_event(self._stop)
 
     @property
     def ready(self) -> bool:
@@ -47,6 +61,17 @@ class ScanRunner:
         return self._scanning
 
     @property
+    def stop_event(self) -> threading.Event:
+        return self._stop
+
+    @property
+    def dedup_in_progress(self) -> bool:
+        runner = self.dedup_runner
+        if runner is None:
+            return False
+        return bool(getattr(runner, "in_progress", False))
+
+    @property
     def last_stats(self) -> ScanStats | None:
         return self._last_stats
 
@@ -54,7 +79,8 @@ class ScanRunner:
         if self._stop.is_set():
             return
         self._stop.set()
-        self.indexer.request_stop()
+        if self._indexer is not None:
+            self._indexer.request_stop()
         logger.info("Scan stop requested")
 
     def run_once(self) -> ScanStats:

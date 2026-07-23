@@ -15,7 +15,9 @@ from debuginfod.config import parse_args
 from debuginfod.database_factory import open_database
 from debuginfod.dedup.scan_hook import DedupScanHook
 from debuginfod.dedup.service import DedupConfig, DedupService
+from debuginfod.dedup_runner import DedupRunner
 from debuginfod.indexer import Indexer
+from debuginfod.logging_config import setup_logging
 from debuginfod.memlimit import MemoryGovernor, clamp_memory_limits
 from debuginfod.metrics import MetricsCollector
 from debuginfod.scan_runner import ScanRunner
@@ -23,11 +25,8 @@ from debuginfod.shutdown import install_scan_shutdown_handlers
 from debuginfod.webapi import create_app
 
 
-def _setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+def _setup_logging(level: str, log_dir: str = "") -> None:
+    setup_logging(level, log_dir or None)
 
 
 def _build_memory_governor(settings: object) -> tuple[MemoryGovernor, list[str]]:
@@ -44,7 +43,7 @@ def _build_memory_governor(settings: object) -> tuple[MemoryGovernor, list[str]]
 
 def main(argv: list[str] | None = None) -> None:
     _args, settings = parse_args(argv)
-    _setup_logging(settings.log_level)
+    _setup_logging(settings.log_level, settings.log_dir)
 
     logger = logging.getLogger(__name__)
     logger.info("Starting debuginfod-python on port %d", settings.port)
@@ -70,6 +69,7 @@ def main(argv: list[str] | None = None) -> None:
         dedup_max_file_mb=settings.memory_dedup_max_file_mb,
     )
     dedup_service: DedupService | None = None
+    dedup_runner: DedupRunner | None = None
     dedup_hook: DedupScanHook | None = None
     if dedup_cfg.enabled:
         dedup_service = DedupService(
@@ -78,7 +78,6 @@ def main(argv: list[str] | None = None) -> None:
             settings.scan_paths,
             memory_governor=memory_governor,
         )
-        dedup_hook = DedupScanHook(dedup_service)
         logger.info(
             "Dedup enabled: projects=%s workers=%d strategy=%s",
             dedup_cfg.projects or "*",
@@ -116,18 +115,27 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     metrics = MetricsCollector()
+    scan_runner = ScanRunner(
+        indexer=None,  # type: ignore[arg-type]
+        interval_sec=settings.rescan_interval_sec,
+        metrics=metrics,
+        dedup_runner=dedup_runner,
+    )
+    if dedup_cfg.enabled and dedup_service is not None:
+        dedup_runner = DedupRunner(dedup_service, scan_runner.stop_event)
+        scan_runner.dedup_runner = dedup_runner
+        dedup_hook = DedupScanHook(dedup_runner)
+
     indexer = Indexer(
         db=db,
         scan_paths=settings.scan_paths,
         workers=settings.scan_workers,
         dedup_hook=dedup_hook,
         memory_governor=memory_governor,
+        stop_event=scan_runner.stop_event,
     )
-    scan_runner = ScanRunner(
-        indexer=indexer,
-        interval_sec=settings.rescan_interval_sec,
-        metrics=metrics,
-    )
+    scan_runner.indexer = indexer
+
     if settings.scan_enabled:
         install_scan_shutdown_handlers(scan_runner)
         scan_runner.start()

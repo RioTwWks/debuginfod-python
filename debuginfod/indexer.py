@@ -165,13 +165,10 @@ class Indexer:
 
         if self.dedup_hook is not None and not self._stop.is_set():
             try:
-                self.dedup_hook.run_ingest_after_scan(stop_event=self._stop)
-                dedup = self.db.dedup_stats()
-                stats.dedup_files_registered = int(dedup.get("total_files", 0))
-                stats.dedup_files_compressed = int(dedup.get("delta_files", 0))
+                self.dedup_hook.schedule_ingest_after_scan(stats)
             except Exception:
                 stats.dedup_errors += 1
-                logger.exception("Dedup ingest after scan failed")
+                logger.exception("Dedup schedule after scan failed")
 
         return stats
 
