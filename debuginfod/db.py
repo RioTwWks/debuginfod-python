@@ -732,21 +732,10 @@ class Database(ScanHistoryMixin, DedupDbMixin):
         artifact_count = self._execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
         source_count = self._execute("SELECT COUNT(*) FROM sources").fetchone()[0]
         scanned_count = self._execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
-
-        bytes_on_disk = 0
-        rows = self._execute(
-            "SELECT DISTINCT file_path FROM artifacts WHERE file_path != ''"
-        ).fetchall()
-        seen: set[str] = set()
-        for row in rows:
-            path = row["file_path"] if isinstance(row, dict) else row[0]
-            if path in seen:
-                continue
-            seen.add(path)
-            try:
-                bytes_on_disk += Path(path).stat().st_size
-            except OSError:
-                continue
+        bytes_row = self._execute(
+            "SELECT COALESCE(SUM(size), 0) FROM scanned_files"
+        ).fetchone()
+        bytes_on_disk = int(bytes_row[0] if bytes_row is not None else 0)
 
         dedup = self.dedup_stats()
         bytes_before = int(dedup.get("bytes_before", 0))

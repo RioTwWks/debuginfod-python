@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATS_CACHE_TTL_SEC = 15.0
+SCANS_CACHE_TTL_SEC = 30.0
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -90,6 +91,44 @@ def register_webui(
     bench_store = benchmark_store or BenchmarkStore()
     default_testdata = benchmark_testdata or Path("testdata/versions")
     stats_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+    scans_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+
+    def _cached_scans_payload(limit: int) -> dict[str, Any]:
+        now = time.monotonic()
+        cached = scans_cache.get("payload")
+        cache_limit = scans_cache.get("limit")
+        if (
+            cached is not None
+            and now < float(scans_cache.get("expires_at", 0.0))
+            and cache_limit == limit
+        ):
+            return cached
+
+        payload: dict[str, Any] = {
+            "index_summary": db.index_summary(),
+            "index_scans": [
+                {
+                    "id": r.id,
+                    "finished_at": r.finished_at,
+                    "duration_ms": r.duration_ms,
+                    "indexed": r.indexed,
+                    "skipped": r.skipped,
+                    "errors": r.errors,
+                    "artifacts_total": r.artifacts_total,
+                    "scanned_files": r.scanned_files,
+                    "bytes_on_disk": r.bytes_on_disk,
+                }
+                for r in db.list_scan_runs(limit)
+            ],
+            "dedup_runs": db.list_dedup_runs(limit) if dedup_enabled else [],
+            "dedup_totals": db.dedup_storage_totals() if dedup_enabled else {},
+            "dedup_by_project": db.dedup_totals_by_project() if dedup_enabled else [],
+            "dedup_enabled": dedup_enabled,
+        }
+        scans_cache["payload"] = payload
+        scans_cache["expires_at"] = now + SCANS_CACHE_TTL_SEC
+        scans_cache["limit"] = limit
+        return payload
 
     def _cached_stats_payload() -> dict[str, Any]:
         now = time.monotonic()
@@ -100,7 +139,7 @@ def register_webui(
         counts = db.count_stats()
         storage = db.get_stats()
         scan = metrics.last_scan()
-        dedup_totals = db.dedup_storage_totals() if dedup_enabled else {}
+        dedup_totals = storage.get("dedup", {}) if dedup_enabled else {}
 
         payload: dict[str, Any] = {
             "uptime_seconds": metrics.uptime_seconds(),
@@ -232,28 +271,7 @@ def register_webui(
 
     @router.get("/ui/api/scans", include_in_schema=False)
     async def ui_scans(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
-        index_scans = [
-            {
-                "id": r.id,
-                "finished_at": r.finished_at,
-                "duration_ms": r.duration_ms,
-                "indexed": r.indexed,
-                "skipped": r.skipped,
-                "errors": r.errors,
-                "artifacts_total": r.artifacts_total,
-                "scanned_files": r.scanned_files,
-                "bytes_on_disk": r.bytes_on_disk,
-            }
-            for r in db.list_scan_runs(limit)
-        ]
-        return {
-            "index_summary": db.index_summary(),
-            "index_scans": index_scans,
-            "dedup_runs": db.list_dedup_runs(limit) if dedup_enabled else [],
-            "dedup_totals": db.dedup_storage_totals() if dedup_enabled else {},
-            "dedup_by_project": db.dedup_totals_by_project() if dedup_enabled else [],
-            "dedup_enabled": dedup_enabled,
-        }
+        return await asyncio.to_thread(_cached_scans_payload, limit)
 
     @router.post("/ui/api/rescan", include_in_schema=False)
     async def ui_rescan() -> dict[str, Any]:

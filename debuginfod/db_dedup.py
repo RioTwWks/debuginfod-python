@@ -267,6 +267,18 @@ class DedupDbMixin:
             (message[:500], file_id),
         )
 
+    def count_dedup_files_by_status(self) -> dict[str, int]:
+        rows = self._execute(
+            "SELECT status, COUNT(*) AS cnt FROM dedup_files GROUP BY status"
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                counts[str(row["status"])] = int(row["cnt"] or 0)
+            else:
+                counts[str(row[0])] = int(row[1] or 0)
+        return counts
+
     def reset_transient_dedup_errors(self) -> int:
         """Re-queue files that failed due to transient memory pressure."""
         patterns = (
@@ -616,10 +628,14 @@ def _dedup_file_bytes_on_disk(
                 return 0
         return 0
     if kind in {"base", "full"}:
+        if comp_size > 0:
+            return comp_size
+        if orig_size > 0:
+            return orig_size
         if file_path:
             try:
                 return Path(file_path).stat().st_size
             except OSError:
                 pass
-        return orig_size
+        return 0
     return 0
