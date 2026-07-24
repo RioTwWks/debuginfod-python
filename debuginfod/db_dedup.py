@@ -209,6 +209,63 @@ class DedupDbMixin:
         ).fetchall()
         return [self._row_to_dedup_file(r) for r in rows]
 
+    def list_dedup_bases_by_stem(self, file_stem: str, limit: int = 32) -> list[DedupFileRecord]:
+        """Return done base files for file_stem (newest build first)."""
+        if limit <= 0:
+            limit = 32
+        rows = self._execute(
+            """
+            SELECT f.id, f.build_dir_id, p.name AS project_name, f.file_path, f.filename,
+                f.file_stem, f.version, f.file_build_num, f.commit_tag,
+                f.storage_kind, f.base_file_id, f.delta_path, f.sha256,
+                f.original_size, f.compressed_size, f.status, f.error_msg
+            FROM dedup_files f
+            JOIN dedup_build_dirs b ON b.id = f.build_dir_id
+            JOIN dedup_projects p ON p.id = b.project_id
+            WHERE f.file_stem = ? AND f.storage_kind = 'base' AND f.status = 'done'
+            ORDER BY f.file_build_num DESC, f.id DESC
+            LIMIT ?
+            """,
+            (file_stem, limit),
+        ).fetchall()
+        return [self._row_to_dedup_file(r) for r in rows]
+
+    def search_dedup_files_for_ui(
+        self,
+        query: str,
+        *,
+        simple_query: bool,
+    ) -> list[DedupFileRecord]:
+        """List dedup files for browse (optional SQL prefilter for simple queries)."""
+        params: list[Any] = []
+        extra_where = ""
+        if simple_query:
+            pattern = f"%{query.strip().lower()}%"
+            extra_where = """
+            AND (
+                LOWER(f.file_path) LIKE ? OR
+                LOWER(f.filename) LIKE ? OR
+                LOWER(f.commit_tag) LIKE ?
+            )
+            """
+            params = [pattern, pattern, pattern]
+        rows = self._execute(
+            f"""
+            SELECT f.id, f.build_dir_id, p.name AS project_name, f.file_path, f.filename,
+                f.file_stem, f.version, f.file_build_num, f.commit_tag,
+                f.storage_kind, f.base_file_id, f.delta_path, f.sha256,
+                f.original_size, f.compressed_size, f.status, f.error_msg
+            FROM dedup_files f
+            JOIN dedup_build_dirs b ON b.id = f.build_dir_id
+            JOIN dedup_projects p ON p.id = b.project_id
+            WHERE f.status != 'error'
+            {extra_where}
+            ORDER BY f.file_path
+            """,
+            tuple(params),
+        ).fetchall()
+        return [self._row_to_dedup_file(r) for r in rows]
+
     def get_dedup_group_base(self, project_name: str, file_stem: str) -> DedupFileRecord | None:
         """Earliest done base/full file for a dedup group (retry after partial failure)."""
         rows = self._execute(

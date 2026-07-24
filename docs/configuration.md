@@ -72,6 +72,7 @@ DEBUGINFOD_LOG_DIR=/var/log/debuginfod
 | Переменная | Описание |
 |------------|----------|
 | `DEBUGINFOD_ADMIN_KEY` | Токен для `POST /admin/rescan` |
+| `DEBUGINFOD_ZABBIX_KEY` | Токен для `GET /zabbix` (заголовок `X-Zabbix-Token` или `?key=`) |
 | `DEBUGINFOD_METADATA_MAXTIME` | Таймаут metadata search (сек) |
 | `DEBUGINFOD_METADATA_PAGE_SIZE` | Размер страницы metadata |
 

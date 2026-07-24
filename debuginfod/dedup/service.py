@@ -28,7 +28,7 @@ class DedupConfig:
     dwz_path: str = "dwz"
     objcopy_path: str = "objcopy"
     dedup_peak_factor: float = 3.0
-    dedup_serial_above_mb: int = 64
+    dedup_serial_above_mb: int = 128
     dedup_max_file_mb: int = 256
 
 

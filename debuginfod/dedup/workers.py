@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from debuginfod.dedup.pipeline import PipelineOptions, mark_singleton_full, process_group, _group_peak_bytes
+from debuginfod.dedup.group_base import DedupNotFoundError, find_group_base
+from debuginfod.dedup.pipeline import (
+    PipelineOptions,
+    compress_one,
+    mark_singleton_full,
+    process_group,
+    _group_peak_bytes,
+)
 from debuginfod.memlimit import MemoryGovernor
 
 logger = logging.getLogger(__name__)
@@ -150,13 +157,37 @@ def _run_group_job(
     stop_event: object | None = None,
 ) -> tuple[int, int, int, int, int]:
     if len(group) == 1:
+        singleton = group[0]
         if not opts.dry_run:
             try:
-                mark_singleton_full(opts, group[0])
+                existing = find_group_base(opts.db, singleton)
+            except DedupNotFoundError:
+                try:
+                    mark_singleton_full(opts, singleton)
+                except Exception as exc:
+                    opts.db.mark_dedup_file_error(singleton.id, str(exc))
+                    return 0, 0, 1, 0, 0
+                return 0, 1, 0, singleton.original_size, singleton.original_size
             except Exception as exc:
-                opts.db.mark_dedup_file_error(group[0].id, str(exc))
+                opts.db.mark_dedup_file_error(singleton.id, str(exc))
                 return 0, 0, 1, 0, 0
-        return 0, 1, 0, group[0].original_size, group[0].original_size
+            try:
+                delta_size = compress_one(
+                    opts,
+                    existing,
+                    singleton,
+                    memory_governor=memory_governor,
+                    stop_event=stop_event,
+                )
+            except Exception as exc:
+                opts.db.mark_dedup_file_error(singleton.id, str(exc))
+                return 0, 0, 1, 0, 0
+            return 1, 1, 0, singleton.original_size, delta_size
+        try:
+            find_group_base(opts.db, singleton)
+            return 1, 1, 0, singleton.original_size, 0
+        except DedupNotFoundError:
+            return 0, 1, 0, singleton.original_size, singleton.original_size
 
     if opts.dry_run:
         bb = sum(f.original_size for f in group)

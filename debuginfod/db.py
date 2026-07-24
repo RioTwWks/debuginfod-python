@@ -621,6 +621,50 @@ class Database(ScanHistoryMixin, DedupDbMixin):
             )
         return out
 
+    def search_debug_artifacts_for_ui(self, query: str) -> list[ArtifactRecord]:
+        """Load debug artifacts for UI browse (SQL prefilter for simple substring queries)."""
+        query = query.strip()
+        params: list[Any] = []
+        where = ""
+        if query and not any(ch in query for ch in "*?["):
+            pattern = f"%{query.lower()}%"
+            where = """
+            WHERE (type = 'debuginfo' OR LOWER(file_path) LIKE '%.debug')
+            AND (
+                LOWER(file_path) LIKE ? OR
+                LOWER(git_commit) LIKE ? OR
+                LOWER(build_id) LIKE ? OR
+                LOWER(raw_build_id) LIKE ?
+            )
+            """
+            params = [pattern, pattern, pattern, pattern]
+        rows = self._execute(
+            f"""
+            SELECT build_id, type, file_path, archive_path, member_path,
+                   build_id_kind, raw_build_id, git_commit, mtime_ns
+            FROM artifacts
+            {where}
+            ORDER BY file_path
+            """,
+            tuple(params),
+        ).fetchall()
+        out: list[ArtifactRecord] = []
+        for row in rows:
+            out.append(
+                ArtifactRecord(
+                    build_id=row["build_id"],
+                    artifact_type=row["type"],
+                    file_path=row["file_path"] or "",
+                    archive_path=row["archive_path"] or "",
+                    member_path=row["member_path"] or "",
+                    build_id_kind=row["build_id_kind"] or "gnu",
+                    raw_build_id=row["raw_build_id"] or "",
+                    git_commit=(row["git_commit"] or "") if "git_commit" in row.keys() else "",
+                    mtime_ns=int(row["mtime_ns"] or 0),
+                )
+            )
+        return out
+
     def list_artifact_records_page(
         self,
         offset: int,
