@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from debuginfod.db import Database
 from debuginfod.dedup.pipeline import BackfillResult, PipelineOptions, run_ingest_all
@@ -13,6 +14,9 @@ from debuginfod.dedup.preprocess import ObjcopyZstd, resolve_preprocessor
 from debuginfod.dedup.restore import RestoreOptions, restore_to_cache
 from debuginfod.dedup.xdelta import Xdelta
 from debuginfod.memlimit import MemoryGovernor, dedup_peak_factor_for_strategy
+
+if TYPE_CHECKING:
+    from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +43,13 @@ class DedupService:
         cfg: DedupConfig,
         scan_paths: list[str | Path],
         memory_governor: MemoryGovernor | None = None,
+        metrics: "MetricsCollector | None" = None,
     ) -> None:
         self.db = db
         self.cfg = cfg
         self.scan_paths = [str(p) for p in scan_paths]
         self._memory_governor = memory_governor
+        self._metrics = metrics
         self._xdelta = Xdelta(cfg.xdelta_path)
         self._preprocessor = resolve_preprocessor(cfg.strategy, cfg.dwz_path, cfg.objcopy_path)
         self._objcopy_zstd = ObjcopyZstd(cfg.objcopy_path)
@@ -79,6 +85,7 @@ class DedupService:
             dedup_peak_factor=peak_factor,
             dedup_serial_above_mb=self.cfg.dedup_serial_above_mb,
             dedup_max_file_mb=self.cfg.dedup_max_file_mb,
+            metrics=self._metrics,
         )
 
     def restore_to_cache(self, cache_dir: str | Path, file_path: str) -> str:

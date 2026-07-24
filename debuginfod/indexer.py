@@ -10,12 +10,15 @@ import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 from debuginfod import buildid
 from debuginfod.db import Database
 from debuginfod.index_worker import IndexWorkerResult, process_elf_path
 from debuginfod.memlimit import MemoryGovernor, release_heap
+
+if TYPE_CHECKING:
+    from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,7 @@ class Indexer:
         stop_event: threading.Event | None = None,
         use_process_pool: bool = True,
         memory_governor: MemoryGovernor | None = None,
+        metrics: "MetricsCollector | None" = None,
     ) -> None:
         self.db = db
         self.scan_paths = [p.resolve() for p in scan_paths]
@@ -94,6 +98,7 @@ class Indexer:
         self._stop = stop_event or threading.Event()
         self._use_process_pool = use_process_pool
         self._memory = memory_governor
+        self._metrics = metrics
         self._executor: ProcessPoolExecutor | ThreadPoolExecutor | None = None
         self._executor_lock = threading.Lock()
 
@@ -127,6 +132,21 @@ class Indexer:
         batch_size = max(scan_workers * 2, 8)
         batch: list[Path] = []
         pool: ProcessPoolExecutor | ThreadPoolExecutor | None = None
+        progress_stop = threading.Event()
+
+        def _progress_loop() -> None:
+            while not progress_stop.wait(0.5):
+                if self._metrics is not None:
+                    self._metrics.update_indexing_progress(
+                        stats.files_indexed,
+                        stats.files_skipped,
+                        stats.errors,
+                    )
+
+        progress_thread: threading.Thread | None = None
+        if self._metrics is not None:
+            progress_thread = threading.Thread(target=_progress_loop, daemon=True)
+            progress_thread.start()
 
         try:
             pool = _create_scan_executor(scan_workers, self._use_process_pool, self._memory)
@@ -152,6 +172,15 @@ class Indexer:
                 stats.cancelled = True
                 return stats
         finally:
+            progress_stop.set()
+            if progress_thread is not None:
+                progress_thread.join(timeout=1.0)
+            if self._metrics is not None:
+                self._metrics.update_indexing_progress(
+                    stats.files_indexed,
+                    stats.files_skipped,
+                    stats.errors,
+                )
             if pool is not None:
                 pool.shutdown(wait=True, cancel_futures=True)
                 with self._executor_lock:
@@ -208,6 +237,8 @@ class Indexer:
     ) -> None:
         if not jobs or self._stop.is_set():
             return
+        if self._metrics is not None:
+            self._metrics.set_scan_current_path(str(jobs[0]))
 
         pending: dict[Future[IndexWorkerResult], Path] = {}
         job_iter = iter(jobs)

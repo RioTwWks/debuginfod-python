@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     for note in limit_notes:
         logger.info("Memory limit adjust: %s", note)
     db = open_database(settings)
+    metrics = MetricsCollector()
     dedup_cfg = DedupConfig(
         enabled=settings.dedup_enabled,
         projects=list(settings.dedup_projects),
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> None:
             dedup_cfg,
             settings.scan_paths,
             memory_governor=memory_governor,
+            metrics=metrics,
         )
         logger.info(
             "Dedup enabled: projects=%s workers=%d strategy=%s",
@@ -114,7 +116,6 @@ def main(argv: list[str] | None = None) -> None:
         settings.dedup_workers if dedup_cfg.enabled else 0,
     )
 
-    metrics = MetricsCollector()
     scan_runner = ScanRunner(
         indexer=None,  # type: ignore[arg-type]
         interval_sec=settings.rescan_interval_sec,
@@ -133,6 +134,7 @@ def main(argv: list[str] | None = None) -> None:
         dedup_hook=dedup_hook,
         memory_governor=memory_governor,
         stop_event=scan_runner.stop_event,
+        metrics=metrics,
     )
     scan_runner.indexer = indexer
 

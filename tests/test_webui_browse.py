@@ -142,6 +142,7 @@ def test_ui_index_browse_section(browse_client: TestClient) -> None:
     assert resp.status_code == 200
     assert "Файлы .debug" in resp.text
     assert 'id="browse-tree"' in resp.text
+    assert 'class="explorer"' in resp.text
     assert "/zabbix" in resp.text
 
 

@@ -18,6 +18,26 @@ from debuginfod.memlimit import MemoryGovernor
 logger = logging.getLogger(__name__)
 
 
+def _report_dedup_progress(
+    opts: PipelineOptions,
+    groups_done: int,
+    compressed: int,
+    skipped: int,
+    errors: int,
+    bytes_before: int,
+    bytes_after: int,
+) -> None:
+    if opts.metrics is not None:
+        opts.metrics.update_dedup_progress(
+            groups_done,
+            compressed,
+            skipped,
+            errors,
+            bytes_before,
+            bytes_after,
+        )
+
+
 def _stopped(stop_event: object | None) -> bool:
     return stop_event is not None and getattr(stop_event, "is_set", lambda: False)()
 
@@ -83,6 +103,7 @@ def process_groups(
         return _run_sequential(opts, jobs, memory_governor=memory_governor, stop_event=stop_event)
 
     compressed = skipped = errors = bytes_before = bytes_after = 0
+    groups_done = 0
     pending: dict = {}
     job_iter = iter(jobs)
 
@@ -116,6 +137,10 @@ def process_groups(
                 errors += e
                 bytes_before += bb
                 bytes_after += ba
+                groups_done += 1
+                _report_dedup_progress(
+                    opts, groups_done, compressed, skipped, errors, bytes_before, bytes_after
+                )
                 if _stopped(stop_event):
                     for other in pending:
                         other.cancel()
@@ -134,6 +159,7 @@ def _run_sequential(
     stop_event: object | None = None,
 ) -> tuple[int, int, int, int, int]:
     compressed = skipped = errors = bytes_before = bytes_after = 0
+    groups_done = 0
     for job in jobs:
         if _stopped(stop_event):
             break
@@ -147,6 +173,10 @@ def _run_sequential(
         errors += e
         bytes_before += bb
         bytes_after += ba
+        groups_done += 1
+        _report_dedup_progress(
+            opts, groups_done, compressed, skipped, errors, bytes_before, bytes_after
+        )
     return compressed, skipped, errors, bytes_before, bytes_after
 
 

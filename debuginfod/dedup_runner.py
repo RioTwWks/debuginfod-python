@@ -34,24 +34,33 @@ class DedupRunner:
     def last_result(self) -> "BackfillResult | None":
         return self._last_result
 
-    def schedule_after_scan(self, scan_stats: "ScanStats") -> None:
+    def schedule_after_scan(
+        self,
+        scan_stats: "ScanStats",
+        *,
+        metrics: object | None = None,
+    ) -> None:
         """Queue dedup after scan; returns immediately."""
         if not self.service.enabled():
+            if metrics is not None and hasattr(metrics, "end_scan"):
+                metrics.end_scan()
             return
         with self._lock:
             if self._in_progress:
                 logger.info("Dedup already in progress, skipping new schedule")
+                if metrics is not None and hasattr(metrics, "end_scan"):
+                    metrics.end_scan()
                 return
             self._in_progress = True
             self._thread = threading.Thread(
                 target=self._run,
-                args=(scan_stats,),
+                args=(scan_stats, metrics),
                 daemon=True,
                 name="dedup-runner",
             )
             self._thread.start()
 
-    def _run(self, scan_stats: "ScanStats") -> None:
+    def _run(self, scan_stats: "ScanStats", metrics: object | None = None) -> None:
         try:
             logger.info(
                 "Background dedup started (scan indexed=%d skipped=%d)",
@@ -68,4 +77,6 @@ class DedupRunner:
         finally:
             with self._lock:
                 self._in_progress = False
+            if metrics is not None and hasattr(metrics, "end_scan"):
+                metrics.end_scan()
             logger.info("Background dedup finished")
