@@ -68,12 +68,9 @@ class UITreeNode:
     path: str
     files: list[UITreeFile] = field(default_factory=list)
     children: list["UITreeNode"] = field(default_factory=list)
-    group: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"name": self.name, "path": self.path}
-        if self.group:
-            payload["group"] = self.group
         if self.files:
             payload["files"] = [f.to_dict() for f in self.files]
         if self.children:
@@ -90,10 +87,14 @@ def ui_project_from_relative_path(rel: str) -> str:
 
 
 def ui_commit_key(file: UITreeFile) -> str:
-    return file_git_commit(file)
+    if commit := file_git_commit(file):
+        return commit
+    return UI_NO_COMMIT_LABEL
 
 
 def ui_commit_label(commit: str) -> str:
+    if commit == UI_NO_COMMIT_LABEL:
+        return commit
     if len(commit) > 16:
         return commit[:12] + "…"
     return commit
@@ -104,6 +105,13 @@ def is_debug_ui_file(row: UIArtifactRow) -> bool:
         return True
     name = (row.filename or Path(row.file).name).lower()
     return name.endswith(".debug")
+
+
+def is_simple_search_query(query: str) -> bool:
+    query = query.strip()
+    if not query:
+        return False
+    return not any(ch in query for ch in "*?[")
 
 
 def matches_unified_query(query: str, *, relative_path: str, filename: str, git_commit: str, buildid: str, raw_buildid: str) -> bool:
@@ -159,15 +167,17 @@ def artifact_record_to_ui_tree_file(
     scan_roots: list[Path],
     *,
     enrich_comment: bool = False,
-    resolve_commit: bool = True,
+    resolve_commit: bool = False,
 ) -> UITreeFile:
     enrich_artifact_row(row, scan_roots, with_comment=enrich_comment)
     rel = row.relative_path or artifact_display_path(row, scan_roots)
     git_commit = (
         _resolve_git_commit(row, elf_fallback=enrich_comment)
         if resolve_commit
-        else row.git_commit
+        else (row.git_commit or "")
     )
+    if not git_commit and enrich_comment and row.comment:
+        git_commit = str(row.comment.get("git_commit") or "").strip()
     return UITreeFile(
         filename=row.filename or Path(row.file).name,
         relative_path=rel,
@@ -204,11 +214,12 @@ def browse_files_for_ui(
 
     query = query.strip()
     enrich_comment = bool(query)
+    simple_query = is_simple_search_query(query)
 
     artifacts: list[UITreeFile] = []
     indexed_paths: set[str] = set()
 
-    for record in db.list_artifact_records():
+    for record in db.search_debug_artifacts_for_ui(query):
         row = _row_from_record(record)
         if not is_debug_ui_file(row):
             continue
@@ -216,7 +227,7 @@ def browse_files_for_ui(
             row,
             scan_roots,
             enrich_comment=enrich_comment,
-            resolve_commit=True,
+            resolve_commit=enrich_comment,
         )
         if query and not matches_unified_query(
             query,
@@ -232,7 +243,7 @@ def browse_files_for_ui(
             indexed_paths.add(abs_path)
         artifacts.append(tree_file)
 
-    dedup_files = _search_dedup_files_for_ui(db, scan_roots, query, indexed_paths)
+    dedup_files = _search_dedup_files_for_ui(db, scan_roots, query, indexed_paths, simple_query)
     files = artifacts + dedup_files
     files.sort(key=lambda f: (f.relative_path, f.filename))
 
@@ -248,11 +259,10 @@ def _search_dedup_files_for_ui(
     scan_roots: list[Path],
     query: str,
     skip_paths: set[str],
+    simple_query: bool,
 ) -> list[UITreeFile]:
     out: list[UITreeFile] = []
-    for record in db.list_dedup_files_for_browse():
-        if record.status == "error":
-            continue
+    for record in db.search_dedup_files_for_ui(query, simple_query=simple_query):
         norm = _normalize_browse_path(record.file_path)
         if norm in skip_paths:
             continue
@@ -272,100 +282,26 @@ def _search_dedup_files_for_ui(
 
 
 def build_ui_tree_from_files(files: list[UITreeFile]) -> list[UITreeNode]:
-    with_commit: list[UITreeFile] = []
-    without_commit: list[UITreeFile] = []
-    for file in files:
-        if file_git_commit(file):
-            with_commit.append(file)
-        else:
-            without_commit.append(file)
-
-    out: list[UITreeNode] = []
-
     commits: dict[str, list[UITreeFile]] = {}
-    for file in with_commit:
-        key = file_git_commit(file)
+    for file in files:
+        key = ui_commit_key(file)
         commits.setdefault(key, []).append(file)
 
-    for commit in sorted(commits):
+    names = sorted(commits)
+    if UI_NO_COMMIT_LABEL in names:
+        names.remove(UI_NO_COMMIT_LABEL)
+        names.append(UI_NO_COMMIT_LABEL)
+
+    out: list[UITreeNode] = []
+    for commit in names:
         out.append(
             UITreeNode(
                 name=ui_commit_label(commit),
                 path=commit,
-                group="commit",
                 files=_sort_ui_tree_files_by_path(commits[commit]),
             )
         )
-
-    out.extend(build_ui_tree_from_directories(without_commit))
     return out
-
-
-@dataclass
-class _TreeNode:
-    children: dict[str, "_TreeNode"] = field(default_factory=dict)
-    files: list[UITreeFile] = field(default_factory=list)
-
-
-def build_ui_tree_from_directories(files: list[UITreeFile]) -> list[UITreeNode]:
-    projects: dict[str, dict[str, list[UITreeFile]]] = {}
-
-    for file in files:
-        project = file.project or ui_project_from_relative_path(file.relative_path)
-        rest = file.relative_path
-        if rest.startswith(project):
-            rest = rest[len(project) :].lstrip("/")
-        dir_path = str(Path(rest).parent)
-        if dir_path == ".":
-            dir_path = ""
-        projects.setdefault(project, {}).setdefault(dir_path, []).append(file)
-
-    out: list[UITreeNode] = []
-    for pname in sorted(projects):
-        root = UITreeNode(name=pname, path=pname, group="project")
-        root.children, root.files = _build_dir_children(pname, projects[pname])
-        out.append(root)
-    return out
-
-
-def _build_dir_children(
-    project: str,
-    dirs: dict[str, list[UITreeFile]],
-) -> tuple[list[UITreeNode], list[UITreeFile]]:
-    if not dirs:
-        return [], []
-
-    root = _TreeNode()
-    for dir_path, dir_files in dirs.items():
-        parts = dir_path.split("/") if dir_path else []
-        cur = root
-        for part in parts:
-            cur = cur.children.setdefault(part, _TreeNode())
-        cur.files.extend(dir_files)
-
-    return _tree_node_to_ui(project, root), _sort_ui_tree_files(root.files)
-
-
-def _tree_node_to_ui(base: str, node: _TreeNode) -> list[UITreeNode]:
-    out: list[UITreeNode] = []
-    for name in sorted(node.children):
-        child = node.children[name]
-        path = f"{base}/{name}"
-        out.append(
-            UITreeNode(
-                name=name,
-                path=path,
-                files=_sort_ui_tree_files(child.files),
-                children=_tree_node_to_ui(path, child),
-            )
-        )
-    return out
-
-
-def _sort_ui_tree_files(files: list[UITreeFile]) -> list[UITreeFile]:
-    if not files:
-        return []
-    return sorted(files, key=lambda f: f.filename)
 
 
 def _sort_ui_tree_files_by_path(files: list[UITreeFile]) -> list[UITreeFile]:

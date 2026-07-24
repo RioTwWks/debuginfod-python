@@ -49,7 +49,7 @@ def test_build_ui_tree_groups_by_commit() -> None:
     assert len(tree[1].files) == 1
 
 
-def test_build_ui_tree_no_commit_uses_directories() -> None:
+def test_build_ui_tree_no_commit_bucket() -> None:
     files = [
         UITreeFile(
             filename="a.debug",
@@ -63,11 +63,10 @@ def test_build_ui_tree_no_commit_uses_directories() -> None:
     ]
     tree = build_ui_tree_from_files(files)
     assert len(tree) == 2
-    assert tree[0].group == "commit"
     assert tree[0].path == "abc123def456"
-    assert tree[1].group == "project"
-    assert tree[1].path == "Released/ProjA"
-    assert tree[1].children
+    assert len(tree[0].files) == 1
+    assert tree[1].path == "(no commit)"
+    assert len(tree[1].files) == 1
 
 
 def test_ui_api_browse_corrupt_elf(tmp_path: Path) -> None:
@@ -152,7 +151,7 @@ def test_ui_api_browse(browse_client: TestClient) -> None:
     data = resp.json()
     assert data["count"] >= 1
     assert data["projects"]
-    assert data["projects"][0]["name"] == "Released/ProjA"
+    assert any(node.get("files") for node in data["projects"])
 
 
 def test_ui_api_rescan_accepted(browse_client: TestClient) -> None:

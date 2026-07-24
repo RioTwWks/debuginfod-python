@@ -35,7 +35,7 @@ class Settings:
     benchmark_py_admin_key: str = ""
     dedup_projects: tuple[str, ...] = ()
     dedup_enabled: bool = False
-    dedup_workers: int = 4
+    dedup_workers: int = 8
     dedup_strategy: str = "xdelta-decompress-dwz"
     dedup_compress_base: bool = True
     database_url: str = ""
@@ -44,7 +44,7 @@ class Settings:
     memory_min_available_mb: int = 512
     memory_dedup_peak_factor: float = 3.0
     memory_dedup_peak_factor_decompress: float = 10.0
-    memory_dedup_serial_above_mb: int = 64
+    memory_dedup_serial_above_mb: int = 128
     memory_dedup_max_file_mb: int = 256
     memory_max_system_ram_pct: int = 65
     zabbix_key: str = ""
@@ -102,7 +102,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         port=_env_int("DEBUGINFOD_PORT", 8003),
         cache_dir=cache_dir,
         rescan_interval_sec=_env_int("DEBUGINFOD_RESCAN_INTERVAL", 3600),
-        scan_workers=_env_int("DEBUGINFOD_SCAN_WORKERS", 4),
+        scan_workers=_env_int("DEBUGINFOD_SCAN_WORKERS", 6),
         xdelta3_path=os.getenv("DEBUGINFOD_XDELTA_PATH", os.getenv("DEBUGINFOD_XDELTA3_PATH", "xdelta3")),
         dwz_path=os.getenv("DEBUGINFOD_DWZ_PATH", "dwz"),
         objcopy_path=os.getenv("DEBUGINFOD_OBJCOPY_PATH", "objcopy"),
@@ -123,7 +123,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         ),
         dedup_projects=dedup_projects,
         dedup_enabled=_env_bool("DEBUGINFOD_DEDUP_ENABLED", bool(dedup_projects)),
-        dedup_workers=_env_int("DEBUGINFOD_DEDUP_WORKERS", 4),
+        dedup_workers=_env_int("DEBUGINFOD_DEDUP_WORKERS", 8),
         dedup_strategy=os.getenv("DEBUGINFOD_DEDUP_STRATEGY", "xdelta-decompress-dwz"),
         dedup_compress_base=_env_bool("DEBUGINFOD_DEDUP_COMPRESS_BASE", True),
         database_url=os.getenv("DEBUGINFOD_DATABASE_URL", ""),
@@ -134,7 +134,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         memory_dedup_peak_factor_decompress=_env_float(
             "DEBUGINFOD_MEMORY_DEDUP_PEAK_FACTOR_DECOMPRESS", 20.0
         ),
-        memory_dedup_serial_above_mb=_env_int("DEBUGINFOD_MEMORY_DEDUP_SERIAL_ABOVE_MB", 64),
+        memory_dedup_serial_above_mb=_env_int("DEBUGINFOD_MEMORY_DEDUP_SERIAL_ABOVE_MB", 128),
         memory_dedup_max_file_mb=_env_int("DEBUGINFOD_DEDUP_MAX_FILE_MB", 256),
         memory_max_system_ram_pct=_env_int("DEBUGINFOD_MEMORY_MAX_SYSTEM_RAM_PCT", 65),
         zabbix_key=os.getenv("DEBUGINFOD_ZABBIX_KEY", ""),
