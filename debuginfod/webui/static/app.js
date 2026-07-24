@@ -17,11 +17,28 @@
   const dedupRunsBody = document.getElementById("dedup-runs-body");
   const rescanBtn = document.getElementById("rescan-btn");
   const rescanStatus = document.getElementById("rescan-status");
+  const mastScanBadge = document.getElementById("mast-scan-badge");
+  const mastDedupBadge = document.getElementById("mast-dedup-badge");
+  const scanProgressPanel = document.getElementById("scan-progress-panel");
+  const scanProgressPhase = document.getElementById("scan-progress-phase");
+  const scanProgressElapsed = document.getElementById("scan-progress-elapsed");
+  const scanProgressIndexing = document.getElementById("scan-progress-indexing");
+  const scanProgressDedup = document.getElementById("scan-progress-dedup");
+  const scanProgressIndexed = document.getElementById("scan-progress-indexed");
+  const scanProgressSkipped = document.getElementById("scan-progress-skipped");
+  const scanProgressErrors = document.getElementById("scan-progress-errors");
+  const scanProgressDedupGroups = document.getElementById("scan-progress-dedup-groups");
+  const scanProgressDedupCompressed = document.getElementById("scan-progress-dedup-compressed");
+  const scanProgressDedupSaved = document.getElementById("scan-progress-dedup-saved");
+  const scanProgressDedupErrors = document.getElementById("scan-progress-dedup-errors");
+  const scanProgressPath = document.getElementById("scan-progress-path");
 
   let lastSearchValue = "";
   let scansLoaded = false;
   let lastScanFinishedAt = "";
   let browseRequestId = 0;
+  let scanProgressPollId = null;
+  let wasScanRunning = false;
 
   function formatNumber(n) {
     return new Intl.NumberFormat("ru-RU").format(n);
@@ -79,6 +96,119 @@
     return div.innerHTML;
   }
 
+  function scanPhaseLabel(phase) {
+    if (phase === "indexing") return "Индексация файлов";
+    if (phase === "dedup") return "Dedup (xdelta / decompress-dwz)";
+    return "Сканирование";
+  }
+
+  function scanElapsedSeconds(data) {
+    if (!data.scan_started_at) return 0;
+    try {
+      return Math.max(0, Math.floor((Date.now() - new Date(data.scan_started_at).getTime()) / 1000));
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function renderScanProgress(data) {
+    const running = !!data.scan_running;
+    if (scanProgressPanel) {
+      scanProgressPanel.hidden = !running;
+    }
+    if (!running) {
+      return;
+    }
+
+    const phase = data.scan_phase || "indexing";
+    if (scanProgressPhase) {
+      scanProgressPhase.textContent = scanPhaseLabel(phase);
+    }
+    if (scanProgressElapsed) {
+      scanProgressElapsed.textContent = "прошло " + formatDuration(scanElapsedSeconds(data));
+    }
+
+    const isDedup = phase === "dedup";
+    if (scanProgressIndexing) scanProgressIndexing.hidden = isDedup;
+    if (scanProgressDedup) scanProgressDedup.hidden = !isDedup;
+
+    if (!isDedup) {
+      if (scanProgressIndexed) {
+        scanProgressIndexed.textContent = formatNumber(data.scan_indexed || 0);
+      }
+      if (scanProgressSkipped) {
+        scanProgressSkipped.textContent = formatNumber(data.scan_skipped || 0);
+      }
+      if (scanProgressErrors) {
+        scanProgressErrors.textContent = formatNumber(data.scan_errors || 0);
+      }
+      if (scanProgressPath) {
+        if (data.scan_current_path) {
+          scanProgressPath.hidden = false;
+          scanProgressPath.textContent = data.scan_current_path;
+        } else {
+          scanProgressPath.hidden = true;
+          scanProgressPath.textContent = "";
+        }
+      }
+    } else {
+      const total = data.dedup_groups_total || 0;
+      const done = data.dedup_groups_processed || 0;
+      if (scanProgressDedupGroups) {
+        scanProgressDedupGroups.textContent =
+          formatNumber(done) + " / " + formatNumber(total);
+      }
+      if (scanProgressDedupCompressed) {
+        scanProgressDedupCompressed.textContent = formatNumber(data.dedup_files_compressed || 0);
+      }
+      if (scanProgressDedupErrors) {
+        scanProgressDedupErrors.textContent = formatNumber(data.dedup_progress_errors || 0);
+      }
+      if (scanProgressDedupSaved) {
+        const before = data.dedup_progress_bytes_before || 0;
+        const after = data.dedup_progress_bytes_after || 0;
+        const saved = before > after ? before - after : 0;
+        scanProgressDedupSaved.textContent =
+          saved > 0 ? formatBytes(saved) : "—";
+      }
+      if (scanProgressPath) {
+        scanProgressPath.hidden = true;
+        scanProgressPath.textContent = "";
+      }
+    }
+  }
+
+  function stopScanProgressPoll() {
+    if (scanProgressPollId !== null) {
+      clearInterval(scanProgressPollId);
+      scanProgressPollId = null;
+    }
+  }
+
+  function startScanProgressPoll() {
+    if (scanProgressPollId !== null) return;
+    scanProgressPollId = setInterval(function () {
+      loadStats();
+    }, 2000);
+  }
+
+  function updateScanProgressPolling(data) {
+    const running = !!data.scan_running;
+    const onScansTab = tabScans && !tabScans.hidden;
+    if (running && onScansTab) {
+      startScanProgressPoll();
+    } else {
+      stopScanProgressPoll();
+    }
+    if (wasScanRunning && !running) {
+      scansLoaded = false;
+      if (onScansTab) {
+        loadScans();
+      }
+    }
+    wasScanRunning = running;
+  }
+
   function setMainTab(tab) {
     mainTabs.forEach(function (btn) {
       const active = btn.dataset.tab === tab;
@@ -91,6 +221,11 @@
     tabScans.hidden = tab !== "scans";
     if (tab === "scans" && !scansLoaded) {
       loadScans();
+    }
+    if (tab === "scans" && wasScanRunning) {
+      startScanProgressPoll();
+    } else if (tab !== "scans") {
+      stopScanProgressPoll();
     }
   }
 
@@ -148,8 +283,8 @@
     const commit = file.git_commit || (file.comment && file.comment.git_commit);
     const commitHtml = commit
       ? '<span class="file-commit mono" title="git commit">' +
-        escapeHtml(commit.slice(0, 12)) +
-        "…</span>"
+        escapeHtml(commit) +
+        "</span>"
       : "";
     const rowKey = file.dedup_id
       ? "dedup-" + file.dedup_id
@@ -204,19 +339,24 @@
     const files = node.files || [];
     const children = node.children || [];
     const fileCount = countTreeFiles(node);
+    const displayName =
+      depth === 0 && node.group === "commit" && node.path
+        ? node.path
+        : node.name;
     const label =
-      escapeHtml(node.name) +
+      escapeHtml(displayName) +
       ' <span class="tree-count">' +
       formatNumber(fileCount) +
       "</span>";
 
     const nodeClass =
       "tree-node" +
-      (depth === 0 ? " tree-commit" : "") +
+      (depth === 0 && node.group === "commit" ? " tree-commit" : "") +
+      (depth === 0 && node.group === "project" ? " tree-project" : "") +
       (children.length === 0 && files.length > 0 && depth > 0 ? " tree-leaf-dir" : "");
     const openAttr = expandAll ? " open" : "";
     const summaryTitle =
-      depth === 0 && node.path && node.path !== node.name
+      depth === 0 && node.group === "commit" && node.path && node.path !== node.name
         ? ' title="' + escapeHtml(node.path) + '"'
         : "";
 
@@ -299,13 +439,35 @@
       const data = await res.json();
       renderStats(data);
     } catch (err) {
-      statsGrid.innerHTML =
-        '<div class="stat-card loading"><span class="stat-label">Ошибка загрузки статистики</span></div>';
+      if (statsGrid) {
+        statsGrid.innerHTML =
+          '<div class="stat-card loading"><span class="stat-label">Ошибка загрузки статистики</span></div>';
+      }
+    }
+  }
+
+  function renderMastBadges(data) {
+    if (mastScanBadge) {
+      if (data.scan_running) {
+        const phase = data.scan_phase === "dedup" ? "dedup" : "scan";
+        mastScanBadge.textContent = phase + "…";
+        mastScanBadge.className = "mast-badge mast-badge-on mast-badge-scanning";
+      } else {
+        mastScanBadge.textContent = data.scan_enabled ? "scan on" : "scan off";
+        mastScanBadge.className =
+          "mast-badge " + (data.scan_enabled ? "mast-badge-on" : "mast-badge-off");
+      }
+    }
+    if (mastDedupBadge) {
+      mastDedupBadge.textContent = data.dedup_enabled ? "dedup on" : "dedup off";
+      mastDedupBadge.className =
+        "mast-badge " + (data.dedup_enabled ? "mast-badge-on" : "mast-badge-off");
     }
   }
 
   function renderStats(data) {
     uptimeEl.textContent = "uptime " + formatDuration(data.uptime_seconds);
+    renderMastBadges(data);
 
     let dedupValue;
     let dedupLabel = "Экономия dedup";
@@ -335,46 +497,90 @@
       { label: "Кэш", value: formatBytes(data.cache_bytes) },
     ];
 
-    statsGrid.innerHTML = cards
-      .map(function (c) {
-        const cls = c.highlight ? "stat-card highlight" : "stat-card";
-        const val =
-          typeof c.value === "number" ? formatNumber(c.value) : c.value;
-        return (
-          '<div class="' +
-          cls +
-          '"><span class="stat-value">' +
-          escapeHtml(String(val)) +
-          '</span><span class="stat-label">' +
-          escapeHtml(c.label) +
-          "</span></div>"
-        );
-      })
-      .join("");
+    if (statsGrid) {
+      statsGrid.innerHTML = cards
+        .map(function (c) {
+          const cls = c.highlight ? "stat-card highlight" : "stat-card";
+          const val =
+            typeof c.value === "number" ? formatNumber(c.value) : c.value;
+          return (
+            '<div class="' +
+            cls +
+            '"><span class="stat-value">' +
+            escapeHtml(String(val)) +
+            '</span><span class="stat-label">' +
+            escapeHtml(c.label) +
+            "</span></div>"
+          );
+        })
+        .join("");
+    }
 
-    const scanParts = [
-      "<span class='scan-item'><strong>" +
-        formatNumber(data.last_scan_indexed) +
-        "</strong> <span>проиндексировано</span></span>",
-      "<span class='scan-item' title='Файлы без изменений (mtime/size) с прошлого scan, а также ELF без build-id'>" +
-        "<strong>" +
-        formatNumber(data.last_scan_skipped) +
-        "</strong> <span>пропущено</span></span>",
-      "<span class='scan-item'><strong>" +
-        formatNumber(data.last_scan_errors) +
-        "</strong> <span>ошибок</span></span>",
-      "<span class='scan-item'><strong>" +
-        escapeHtml(formatMs(data.last_scan_duration_ms)) +
-        "</strong> <span>длительность</span></span>",
-    ];
-    if (data.last_scan_finished_at) {
+    const scanParts = [];
+    if (data.scan_running) {
+      const phase = scanPhaseLabel(data.scan_phase || "indexing");
       scanParts.push(
         "<span class='scan-item'><strong>" +
-          escapeHtml(data.last_scan_finished_at) +
-          "</strong> <span>завершено</span></span>"
+          escapeHtml(phase) +
+          "</strong> <span>выполняется</span></span>"
       );
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          formatNumber(data.scan_indexed || 0) +
+          "</strong> <span>проиндексировано</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item' title='Файлы без изменений (mtime/size) с прошлого scan, а также ELF без build-id'>" +
+          "<strong>" +
+          formatNumber(data.scan_skipped || 0) +
+          "</strong> <span>пропущено</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          formatNumber(data.scan_errors || 0) +
+          "</strong> <span>ошибок</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          escapeHtml(formatDuration(scanElapsedSeconds(data))) +
+          "</strong> <span>прошло</span></span>"
+      );
+    } else {
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          formatNumber(data.last_scan_indexed) +
+          "</strong> <span>проиндексировано</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item' title='Файлы без изменений (mtime/size) с прошлого scan, а также ELF без build-id'>" +
+          "<strong>" +
+          formatNumber(data.last_scan_skipped) +
+          "</strong> <span>пропущено</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          formatNumber(data.last_scan_errors) +
+          "</strong> <span>ошибок</span></span>"
+      );
+      scanParts.push(
+        "<span class='scan-item'><strong>" +
+          escapeHtml(formatMs(data.last_scan_duration_ms)) +
+          "</strong> <span>длительность</span></span>"
+      );
+      if (data.last_scan_finished_at) {
+        scanParts.push(
+          "<span class='scan-item'><strong>" +
+            escapeHtml(data.last_scan_finished_at) +
+            "</strong> <span>завершено</span></span>"
+        );
+      }
     }
-    scanInfo.innerHTML = scanParts.join("");
+    if (scanInfo) {
+      scanInfo.innerHTML = scanParts.join("");
+    }
+
+    renderScanProgress(data);
+    updateScanProgressPolling(data);
 
     if (data.last_scan_finished_at) {
       lastScanFinishedAt = data.last_scan_finished_at;
@@ -382,6 +588,7 @@
 
     if (rescanBtn) {
       rescanBtn.hidden = !data.scan_enabled;
+      rescanBtn.disabled = !!data.scan_running;
     }
   }
 
@@ -426,21 +633,23 @@
   }
 
   function waitForScanComplete(since) {
-    const deadline = Date.now() + 5 * 60 * 1000;
     return new Promise(function (resolve, reject) {
       function poll() {
-        if (Date.now() > deadline) {
-          reject(new Error("таймаут ожидания scan"));
-          return;
-        }
         fetch("/ui/api/stats")
           .then(function (res) {
             if (!res.ok) throw new Error("HTTP " + res.status);
             return res.json();
           })
           .then(function (data) {
-            if (data.last_scan_finished_at && data.last_scan_finished_at !== since) {
-              lastScanFinishedAt = data.last_scan_finished_at;
+            renderScanProgress(data);
+            if (rescanStatus && data.scan_running) {
+              const phase = data.scan_phase === "dedup" ? "dedup" : "сканирование";
+              rescanStatus.textContent = phase + "…";
+            }
+            if (!data.scan_running) {
+              if (data.last_scan_finished_at && data.last_scan_finished_at !== since) {
+                lastScanFinishedAt = data.last_scan_finished_at;
+              }
               resolve();
               return;
             }
@@ -680,6 +889,11 @@
 
   loadStats();
   setInterval(loadStats, 30000);
+  setInterval(function () {
+    if (wasScanRunning) {
+      loadStats();
+    }
+  }, 2000);
   setMainTab("dashboard");
   doBrowse("");
 })();

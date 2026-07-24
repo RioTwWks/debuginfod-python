@@ -18,6 +18,7 @@ from debuginfod.dedup.xdelta import Xdelta, delta_path_for
 
 if TYPE_CHECKING:
     from debuginfod.memlimit import MemoryGovernor
+    from debuginfod.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class PipelineOptions:
     dedup_peak_factor: float = 3.0
     dedup_serial_above_mb: int = 64
     dedup_max_file_mb: int = 256
+    metrics: "MetricsCollector | None" = None
 
 
 @dataclass
@@ -169,6 +171,8 @@ def run_ingest_all(opts: PipelineOptions, *, scan_indexed: int = -1) -> Backfill
     groups = group_files(files)
     groups = expand_dedup_groups_with_bases(opts.db, groups)
     result.groups_processed = len(groups)
+    if opts.metrics is not None:
+        opts.metrics.set_dedup_groups_total(len(groups))
     from debuginfod.dedup.workers import process_groups
 
     compressed, skipped, errors, b_before, b_after = process_groups(

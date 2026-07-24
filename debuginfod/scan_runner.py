@@ -105,8 +105,14 @@ class ScanRunner:
 
         logger.info("Starting scan")
         started = time.perf_counter()
+        if self.metrics is not None:
+            self.metrics.begin_scan("indexing")
         try:
             stats = self.indexer.scan()
+        except Exception:
+            if self.metrics is not None:
+                self.metrics.end_scan()
+            raise
         finally:
             with self._lock:
                 self._scanning = False
@@ -118,6 +124,19 @@ class ScanRunner:
             self._last_stats = stats
             if not stats.cancelled:
                 self._ready = True
+
+        if stats.cancelled:
+            if self.metrics is not None:
+                self.metrics.end_scan()
+        elif (
+            self.dedup_runner is not None
+            and getattr(getattr(self.dedup_runner, "service", None), "enabled", lambda: False)()
+        ):
+            if self.metrics is not None:
+                self.metrics.set_scan_phase("dedup")
+            self.dedup_runner.schedule_after_scan(stats, metrics=self.metrics)
+        elif self.metrics is not None:
+            self.metrics.end_scan()
 
         if self.metrics is not None and not stats.cancelled:
             self.metrics.record_scan(

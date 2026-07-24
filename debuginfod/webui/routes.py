@@ -164,6 +164,26 @@ def register_webui(
         }
         if scan.finished_at is not None:
             payload["last_scan_finished_at"] = scan.finished_at.replace(microsecond=0).isoformat()
+
+        progress = metrics.scan_progress()
+        payload["scan_running"] = progress.running
+        if progress.running:
+            payload["scan_phase"] = progress.phase
+            if progress.started_at is not None:
+                payload["scan_started_at"] = progress.started_at.replace(microsecond=0).isoformat()
+            payload["scan_indexed"] = progress.indexed
+            payload["scan_skipped"] = progress.skipped
+            payload["scan_errors"] = progress.errors
+            if progress.current_path:
+                payload["scan_current_path"] = progress.current_path
+            payload["dedup_groups_total"] = progress.dedup_groups_total
+            payload["dedup_groups_processed"] = progress.dedup_groups_processed
+            payload["dedup_files_compressed"] = progress.dedup_files_compressed
+            payload["dedup_files_skipped"] = progress.dedup_files_skipped
+            payload["dedup_progress_errors"] = progress.dedup_errors
+            payload["dedup_progress_bytes_before"] = progress.dedup_bytes_before
+            payload["dedup_progress_bytes_after"] = progress.dedup_bytes_after
+
         stats_cache["payload"] = payload
         stats_cache["expires_at"] = now + STATS_CACHE_TTL_SEC
         return payload

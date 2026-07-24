@@ -32,7 +32,7 @@ def ui_client(tmp_path: Path) -> TestClient:
     subprocess.run(["gcc", "-g", "-O0", "-o", str(binary), str(src)], check=True)
 
     metrics = MetricsCollector()
-    indexer = Indexer(db=db, scan_paths=[scan_dir])
+    indexer = Indexer(db=db, scan_paths=[scan_dir], metrics=metrics)
     runner = ScanRunner(indexer=indexer, interval_sec=3600, metrics=metrics)
     runner.run_once()
 
@@ -43,15 +43,20 @@ def ui_client(tmp_path: Path) -> TestClient:
         metrics=metrics,
         ui_enabled=True,
     )
-    return TestClient(app)
+    client = TestClient(app)
+    client._metrics = metrics  # type: ignore[attr-defined]
+    return client
 
 
 def test_ui_index(ui_client: TestClient) -> None:
     resp = ui_client.get("/ui/")
     assert resp.status_code == 200
     assert "debuginfod-python" in resp.text
+    assert 'class="console"' in resp.text
+    assert 'class="brand-mast"' in resp.text
     assert "Файлы .debug" in resp.text
     assert 'id="browse-tree"' in resp.text
+    assert "debuginfo_2x.png" in resp.text
 
 
 def test_ui_redirect(ui_client: TestClient) -> None:
@@ -63,9 +68,14 @@ def test_ui_redirect(ui_client: TestClient) -> None:
 def test_ui_static_assets(ui_client: TestClient) -> None:
     css = ui_client.get("/ui/static/app.css")
     js = ui_client.get("/ui/static/app.js")
+    theme = ui_client.get("/ui/static/theme.js")
+    logo = ui_client.get("/ui/static/debuginfo_2x.png")
     assert css.status_code == 200
     assert js.status_code == 200
-    assert "stat-card" in css.text
+    assert theme.status_code == 200
+    assert logo.status_code == 200
+    assert "brand-mast" in css.text
+    assert "renderMastBadges" in js.text
 
 
 def test_ui_api_stats(ui_client: TestClient) -> None:
@@ -75,6 +85,22 @@ def test_ui_api_stats(ui_client: TestClient) -> None:
     assert data["artifacts_total"] >= 1
     assert "uptime_seconds" in data
     assert "cache_bytes" in data
+    assert data["scan_running"] is False
+
+
+def test_ui_api_stats_scan_progress(ui_client: TestClient) -> None:
+    metrics = ui_client._metrics  # type: ignore[attr-defined]
+    metrics.begin_scan("indexing")
+    metrics.update_indexing_progress(42, 100, 2)
+    try:
+        data = ui_client.get("/ui/api/stats").json()
+        assert data["scan_running"] is True
+        assert data["scan_phase"] == "indexing"
+        assert data["scan_indexed"] == 42
+        assert data["scan_skipped"] == 100
+        assert data["scan_errors"] == 2
+    finally:
+        metrics.end_scan()
 
 
 def test_ui_api_search_buildid(ui_client: TestClient) -> None:
